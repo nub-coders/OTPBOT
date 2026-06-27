@@ -20,6 +20,7 @@ from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPT
 import database as db
 import clients
 import payments
+from utils import detect_country, get_country_flag, get_country_name, search_country
 
 log = logging.getLogger(__name__)
 
@@ -72,13 +73,14 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 List Numbers", callback_data="list_numbers"),
         ],
         [
-            InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
+            InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing"),
             InlineKeyboardButton("👥 Users", callback_data="users_list"),
         ],
         [
+            InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
             InlineKeyboardButton("📊 Stats", callback_data="stats"),
-            InlineKeyboardButton("🔙 Back", callback_data="main_menu"),
         ],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
     ])
 
 
@@ -138,7 +140,7 @@ def _register_handlers(app: Client):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer("⛔ Admin only.", show_alert=True)
             return
-        await safe_edit(cq.message,"⚙️ **Admin Panel**", reply_markup=admin_kb())
+        await safe_edit(cq.message, "⚙️ **Admin Panel**", reply_markup=admin_kb())
 
     # ── Add Number Flow ──
 
@@ -152,7 +154,7 @@ def _register_handlers(app: Client):
             "📱 **Add Number**\n\n"
             "Send the phone number in international format:\n"
             "Example: `+1234567890`\n\n"
-            "Then you'll be asked to set a price (credits per OTP).",
+            "Country and pricing will be detected automatically.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
             ]),
@@ -166,7 +168,74 @@ def _register_handlers(app: Client):
                 await state["client"].disconnect()
             except Exception:
                 pass
-        await safe_edit(cq.message,"❌ Cancelled.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(cq.message, "❌ Cancelled.", reply_markup=back_kb("admin_panel"))
+
+    # ── Country confirmation after adding number ──
+
+    @app.on_callback_query(filters.regex("^cc_yes$"))
+    async def cb_cc_yes(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "confirm_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+
+        phone = state["phone"]
+        cc = state["country_code"]
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+
+        await db.save_session(phone, state["session_string"], cq.from_user.id,
+                              password=state.get("password", ""), country_code=cc)
+        auth_states.pop(cq.from_user.id, None)
+
+        price = await db.get_country_price(cc)
+        await safe_edit(cq.message,
+            f"✅ **Number added successfully!**\n\n"
+            f"📱 `{phone}` — {flag} {name}\n"
+            f"💰 Country price: **{price}** credits per OTP",
+            reply_markup=back_kb("admin_panel"),
+        )
+
+    @app.on_callback_query(filters.regex("^cc_no$"))
+    async def cb_cc_no(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "confirm_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+
+        auth_states[cq.from_user.id]["step"] = "manual_country"
+        await safe_edit(cq.message,
+            f"🌍 **Select Country for** `{state['phone']}`\n\n"
+            "Type the country name or send its flag emoji:\n"
+            "Example: `India` or `🇮🇳`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^cc_pick:"))
+    async def cb_cc_pick(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") not in ("manual_country", "confirm_country"):
+            await cq.answer("No pending action.", show_alert=True)
+            return
+
+        cc = cq.data.split(":", 1)[1]
+        phone = state["phone"]
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+
+        await db.save_session(phone, state["session_string"], cq.from_user.id,
+                              password=state.get("password", ""), country_code=cc)
+        auth_states.pop(cq.from_user.id, None)
+
+        price = await db.get_country_price(cc)
+        await safe_edit(cq.message,
+            f"✅ **Number added successfully!**\n\n"
+            f"📱 `{phone}` — {flag} {name}\n"
+            f"💰 Country price: **{price}** credits per OTP",
+            reply_markup=back_kb("admin_panel"),
+        )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
         "start", "help", "cancel", "addcred",
@@ -184,22 +253,90 @@ def _register_handlers(app: Client):
         if not state:
             return
 
-        if state["step"] == "phone":
+        step = state["step"]
+        if step == "phone":
             await _handle_phone(message, text)
-        elif state["step"] == "code":
+        elif step == "code":
             await _handle_code(message, text)
-        elif state["step"] == "password":
+        elif step == "password":
             await _handle_password(message, text)
-        elif state["step"] == "price":
-            await _handle_set_price(message, text)
-        elif state["step"] == "set_price":
-            await _handle_modify_price(message, text)
-        elif state["step"] == "update_password_old":
+        elif step == "set_country_price":
+            await _handle_set_country_price(message, text)
+        elif step == "manual_country":
+            await _handle_manual_country(message, text)
+        elif step == "update_password_old":
             await _handle_update_password_old(message, text)
-        elif state["step"] == "update_password_new":
+        elif step == "update_password_new":
             await _handle_update_password_new(message, text)
 
-    # ── List Numbers ──
+    # ── Country Pricing ──
+
+    @app.on_callback_query(filters.regex("^country_pricing$"))
+    async def cb_country_pricing(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        sessions = await db.get_all_sessions()
+        prices = await db.get_all_country_prices()
+
+        countries = {}
+        for s in sessions:
+            cc = s.get("country_code", "XX")
+            if cc not in countries:
+                countries[cc] = {"total": 0, "active": 0}
+            countries[cc]["total"] += 1
+            if s.get("status") == "active":
+                countries[cc]["active"] += 1
+
+        if not countries:
+            await safe_edit(cq.message,
+                "💰 **Country Pricing**\n\nNo numbers added yet.",
+                reply_markup=back_kb("admin_panel"),
+            )
+            return
+
+        lines = ["💰 **Country Pricing**\n"]
+        buttons = []
+        for cc in sorted(countries.keys()):
+            flag = get_country_flag(cc)
+            name = get_country_name(cc)
+            price = prices.get(cc, 1)
+            info = countries[cc]
+            lines.append(f"{flag} **{name}** ({cc}) — **{price}** cr — {info['active']}/{info['total']} numbers")
+            buttons.append([InlineKeyboardButton(
+                f"{flag} {name} — {price} cr",
+                callback_data=f"setcprice:{cc}",
+            )])
+
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        await safe_edit(cq.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^setcprice:"))
+    async def cb_setcprice(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        cc = cq.data.split(":", 1)[1]
+        price = await db.get_country_price(cc)
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+
+        auth_states[cq.from_user.id] = {"step": "set_country_price", "country_code": cc}
+        await safe_edit(cq.message,
+            f"💰 **Set Price for {flag} {name}**\n\n"
+            f"Current price: **{price}** credits per OTP\n\n"
+            "Send the new price:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="country_pricing")],
+            ]),
+        )
+
+    # ── List Numbers (Admin) ──
 
     @app.on_callback_query(filters.regex("^list_numbers$"))
     async def cb_list_numbers(_, cq: CallbackQuery):
@@ -215,19 +352,29 @@ def _register_handlers(app: Client):
             )
             return
 
+        prices = await db.get_all_country_prices()
+        by_country = {}
+        for s in sessions:
+            cc = s.get("country_code", "XX")
+            by_country.setdefault(cc, []).append(s)
+
         lines = ["📋 **Registered Numbers:**\n"]
         buttons = []
-        for s in sessions:
-            phone = s["phone_number"]
-            status_icon = {"active": "🟢", "sold": "🔴", "error": "⚠️"}.get(s.get("status"), "⚪")
-            price = s.get("price", 1)
-            assigned = clients.get_request_user(phone)
-            assigned_text = f" → user `{assigned}`" if assigned else ""
-            error_text = f"\n  └ ❗ {s['last_error'][:80]}" if s.get("last_error") else ""
-            lines.append(f"{status_icon} `{phone}` — 💰 {price} cr{assigned_text}{error_text}")
-            buttons.append([
-                InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}"),
-            ])
+        for cc in sorted(by_country.keys()):
+            flag = get_country_flag(cc)
+            name = get_country_name(cc)
+            price = prices.get(cc, 1)
+            lines.append(f"\n{flag} **{name}** — {price} cr/OTP")
+            for s in by_country[cc]:
+                phone = s["phone_number"]
+                status_icon = {"active": "🟢", "sold": "🔴", "error": "⚠️"}.get(s.get("status"), "⚪")
+                assigned = clients.get_request_user(phone)
+                assigned_text = f" → user `{assigned}`" if assigned else ""
+                error_text = f"\n  └ ❗ {s['last_error'][:80]}" if s.get("last_error") else ""
+                lines.append(f"  {status_icon} `{phone}`{assigned_text}{error_text}")
+                buttons.append([
+                    InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}"),
+                ])
 
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
         await safe_edit(cq.message,
@@ -278,15 +425,19 @@ def _register_handlers(app: Client):
             await cq.answer("Number not found.", show_alert=True)
             return
 
+        cc = session.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        price = await db.get_country_price(cc)
         status = session.get("status", "unknown")
-        price = session.get("price", 1)
         pwd = session.get("password", "")
         error = session.get("last_error", "")
 
         info = (
             f"📱 **Number:** `{phone}`\n"
+            f"{flag} **Country:** {name} ({cc})\n"
             f"📊 Status: **{status}**\n"
-            f"💰 Price: **{price}** credits\n"
+            f"💰 Country price: **{price}** credits\n"
             f"🔐 Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
         )
         if error:
@@ -295,10 +446,9 @@ def _register_handlers(app: Client):
         buttons = [
             [
                 InlineKeyboardButton("🔍 Verify", callback_data=f"verify:{phone}"),
-                InlineKeyboardButton("💰 Set Price", callback_data=f"setprice:{phone}"),
+                InlineKeyboardButton("🔐 Update Password", callback_data=f"updpwd:{phone}"),
             ],
             [
-                InlineKeyboardButton("🔐 Update Password", callback_data=f"updpwd:{phone}"),
                 InlineKeyboardButton("❌ Remove", callback_data=f"rm:{phone}"),
             ],
             [InlineKeyboardButton("🔙 Back", callback_data="list_numbers")],
@@ -348,36 +498,13 @@ def _register_handlers(app: Client):
 
         phone = cq.data.split(":", 1)[1]
         old_session = await db.get_session(phone)
-        old_price = old_session.get("price", 1) if old_session else 1
-        auth_states[cq.from_user.id] = {"step": "phone", "prefill_phone": phone, "old_price": old_price}
+        old_cc = old_session.get("country_code", "XX") if old_session else "XX"
+        auth_states[cq.from_user.id] = {"step": "phone", "prefill_phone": phone, "old_country": old_cc}
         await safe_edit(cq.message,
             f"🔄 **Re-adding** `{phone}`\n\n"
             "A new code will be sent. Enter the verification code when received.",
         )
-        from pyrogram.types import Message as _Msg
         await _handle_phone_direct(cq.from_user.id, phone, cq.message)
-
-    @app.on_callback_query(filters.regex(r"^setprice:"))
-    async def cb_setprice(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
-            return
-
-        phone = cq.data.split(":", 1)[1]
-        session = await db.get_session(phone)
-        if not session:
-            await cq.answer("Number not found.", show_alert=True)
-            return
-
-        auth_states[cq.from_user.id] = {"step": "set_price", "phone": phone}
-        await safe_edit(cq.message,
-            f"💰 **Set Price for** `{phone}`\n\n"
-            f"Current price: **{session.get('price', 1)}** credits\n\n"
-            "Send the new price (number of credits per OTP):",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"num_actions:{phone}")],
-            ]),
-        )
 
     @app.on_callback_query(filters.regex(r"^updpwd:"))
     async def cb_updpwd(_, cq: CallbackQuery):
@@ -577,7 +704,7 @@ def _register_handlers(app: Client):
             reply_markup=back_kb("admin_panel"),
         )
 
-    # ── Get Number (User) ──
+    # ── Get Number (User) — Country-based ──
 
     @app.on_callback_query(filters.regex("^get_number$"))
     async def cb_get_number(_, cq: CallbackQuery):
@@ -590,27 +717,64 @@ def _register_handlers(app: Client):
             )
             return
 
+        prices = await db.get_all_country_prices()
+        by_country = {}
+        for s in sessions:
+            cc = s.get("country_code", "XX")
+            by_country.setdefault(cc, []).append(s)
+
+        lines = ["🌍 **Select a Country**\n"]
+        buttons = []
+        for cc in sorted(by_country.keys()):
+            flag = get_country_flag(cc)
+            name = get_country_name(cc)
+            price = prices.get(cc, 1)
+            nums = by_country[cc]
+            available = sum(1 for s in nums if not clients.get_request_user(s["phone_number"]))
+            lines.append(f"{flag} {name} — **{price}** cr — {available} available")
+            buttons.append([InlineKeyboardButton(
+                f"{flag} {name} — {price} cr ({available})",
+                callback_data=f"country:{cc}",
+            )])
+
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
+        await safe_edit(cq.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^country:"))
+    async def cb_country(_, cq: CallbackQuery):
+        cc = cq.data.split(":", 1)[1]
+        sessions = await db.get_active_sessions_by_country(cc)
+        if not sessions:
+            await cq.answer("No numbers available for this country.", show_alert=True)
+            return
+
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        price = await db.get_country_price(cc)
+
         buttons = []
         for s in sessions:
             phone = s["phone_number"]
-            price = s.get("price", 1)
             assigned = clients.get_request_user(phone)
             if assigned:
                 buttons.append([
-                    InlineKeyboardButton(f"🔴 {phone} — {price} cr (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"🔴 {phone} (in use)", callback_data="noop")
                 ])
             else:
                 buttons.append([
                     InlineKeyboardButton(
-                        f"🟢 {phone} — {price} cr", callback_data=f"sel:{phone}"
+                        f"🟢 {phone}", callback_data=f"sel:{phone}"
                     )
                 ])
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="get_number")])
         await safe_edit(cq.message,
-            "📱 **Available Numbers**\n\n"
-            "Select a number to receive OTPs.\n"
-            f"Timeout: {OTP_TIMEOUT // 60} minutes.",
+            f"{flag} **{name}** — **{price}** credits per OTP\n\n"
+            f"Select a number:\n"
+            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -632,7 +796,8 @@ def _register_handlers(app: Client):
             await cq.answer("🔴 Already assigned to someone else.", show_alert=True)
             return
 
-        price = session.get("price", 1)
+        cc = session.get("country_code", "XX")
+        price = await db.get_country_price(cc)
         credits = await db.get_credits(cq.from_user.id)
         if credits < price:
             await cq.answer(
@@ -655,12 +820,15 @@ def _register_handlers(app: Client):
 
         clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT)
 
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
         credits = await db.get_credits(cq.from_user.id)
         credit_line = f"\n💰 Credits: {credits}"
         pwd = session.get("password", "")
         pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
         await safe_edit(cq.message,
             f"✅ **Number assigned!**\n\n"
+            f"{flag} {name}\n"
             f"📱 `{phone}`\n"
             f"💰 Price: **{price}** credits per OTP\n"
             f"⏱ Timeout: {OTP_TIMEOUT // 60} min{credit_line}{pwd_line}\n\n"
@@ -749,7 +917,7 @@ def _register_handlers(app: Client):
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
-        await safe_edit(cq.message,"⏳ Generating QR code...")
+        await safe_edit(cq.message, "⏳ Generating QR code...")
         qr = await asyncio.to_thread(
             payments.create_razorpay_qr, plan["label"], plan["amount_inr"], cq.from_user.id,
         )
@@ -840,7 +1008,7 @@ def _register_handlers(app: Client):
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
-        await safe_edit(cq.message,"⏳ Fetching deposit address...")
+        await safe_edit(cq.message, "⏳ Fetching deposit address...")
         ok, info = await asyncio.to_thread(
             payments.get_binance_deposit_address, "USDT", network,
         )
@@ -879,7 +1047,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex("^cancel_pay$"))
     async def cb_cancel_pay(_, cq: CallbackQuery):
         pay_states.pop(cq.from_user.id, None)
-        await safe_edit(cq.message,"❌ Payment cancelled.", reply_markup=back_kb("main_menu"))
+        await safe_edit(cq.message, "❌ Payment cancelled.", reply_markup=back_kb("main_menu"))
 
     # ── Help / Cancel ──
 
@@ -892,7 +1060,7 @@ def _register_handlers(app: Client):
             "/cancel — Cancel current operation\n\n"
             "**How it works:**\n"
             "1. Admin adds Telegram numbers via the bot\n"
-            "2. Select an available number\n"
+            "2. Select a country, then pick a number\n"
             "3. OTP messages arriving on that number are forwarded to you\n"
             "4. The number auto-releases after timeout",
         )
@@ -910,14 +1078,15 @@ def _register_handlers(app: Client):
         ))
 
 
-# ── Auth helpers (called from on_text handler) ──
+# ── Auth helpers ──
 
 async def _handle_phone(message: Message, phone: str):
     user_id = message.from_user.id
     if not phone.startswith("+"):
         phone = "+" + phone
 
-    status_msg = await message.reply("⏳ Sending code request...")
+    cc, cname, cflag = detect_country(phone)
+    status_msg = await message.reply(f"⏳ Sending code to `{phone}` ({cflag} {cname})...")
 
     try:
         client = Client(
@@ -933,9 +1102,10 @@ async def _handle_phone(message: Message, phone: str):
             "phone": phone,
             "client": client,
             "phone_code_hash": sent_code.phone_code_hash,
+            "country_code": cc,
         }
         await safe_edit(status_msg,
-            f"✅ Code sent to `{phone}`\n\n"
+            f"✅ Code sent to `{phone}` ({cflag} {cname})\n\n"
             "Enter the verification code you received:\n\n"
             "💡 If Telegram sent it as a message, "
             "add spaces or dots between digits to avoid the code being blocked.\n"
@@ -979,20 +1149,24 @@ async def _handle_code(message: Message, code: str):
         session_string = await client.export_session_string()
         await client.disconnect()
 
-        old_price = state.get("old_price")
+        cc, cname, cflag = detect_country(phone)
         auth_states[user_id] = {
-            "step": "price",
+            "step": "confirm_country",
             "phone": phone,
             "session_string": session_string,
             "password": "",
+            "country_code": cc,
         }
-        if old_price:
-            auth_states[user_id]["old_price"] = old_price
         await safe_edit(status_msg,
             f"✅ Code verified for `{phone}`\n\n"
-            f"💰 Set the **price** (credits per OTP) for this number:\n"
-            f"Send a number (e.g. `1`, `5`, `10`)"
-            + (f"\n\nPrevious price was **{old_price}**." if old_price else ""),
+            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n\n"
+            "Is this correct?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data="cc_yes"),
+                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
+                ],
+            ]),
         )
     except SessionPasswordNeeded:
         auth_states[user_id]["step"] = "password"
@@ -1001,7 +1175,7 @@ async def _handle_code(message: Message, code: str):
             "Enter the 2FA password:",
         )
     except PhoneCodeInvalid:
-        await safe_edit(status_msg,"❌ Invalid code. Try again:")
+        await safe_edit(status_msg, "❌ Invalid code. Try again:")
     except PhoneCodeExpired:
         auth_states.pop(user_id, None)
         try:
@@ -1037,23 +1211,27 @@ async def _handle_password(message: Message, password: str):
         session_string = await client.export_session_string()
         await client.disconnect()
 
-        old_price = state.get("old_price")
+        cc, cname, cflag = detect_country(phone)
         auth_states[user_id] = {
-            "step": "price",
+            "step": "confirm_country",
             "phone": phone,
             "session_string": session_string,
             "password": password,
+            "country_code": cc,
         }
-        if old_price:
-            auth_states[user_id]["old_price"] = old_price
         await safe_edit(status_msg,
             f"✅ Password accepted for `{phone}`\n\n"
-            f"💰 Set the **price** (credits per OTP) for this number:\n"
-            f"Send a number (e.g. `1`, `5`, `10`)"
-            + (f"\n\nPrevious price was **{old_price}**." if old_price else ""),
+            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n\n"
+            "Is this correct?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data="cc_yes"),
+                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
+                ],
+            ]),
         )
     except PasswordHashInvalid:
-        await safe_edit(status_msg,"❌ Wrong password. Try again:")
+        await safe_edit(status_msg, "❌ Wrong password. Try again:")
     except Exception as e:
         auth_states.pop(user_id, None)
         try:
@@ -1066,10 +1244,10 @@ async def _handle_password(message: Message, password: str):
         )
 
 
-# ── Price / re-add / password-update helpers ──
+# ── Re-add / country-price / password-update helpers ──
 
 async def _handle_phone_direct(user_id: int, phone: str, reply_target):
-    """Start auth flow for a known phone (used by re-add)."""
+    cc, cname, cflag = detect_country(phone)
     try:
         client = Client(
             name=f"auth_{phone.replace('+', '')}",
@@ -1079,16 +1257,16 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
         )
         await client.connect()
         sent_code = await client.send_code(phone)
-        old_price = auth_states.get(user_id, {}).get("old_price", 1)
+        old_cc = auth_states.get(user_id, {}).get("old_country", cc)
         auth_states[user_id] = {
             "step": "code",
             "phone": phone,
             "client": client,
             "phone_code_hash": sent_code.phone_code_hash,
-            "old_price": old_price,
+            "country_code": old_cc,
         }
         await safe_edit(reply_target,
-            f"🔄 **Re-adding** `{phone}`\n\n"
+            f"🔄 **Re-adding** `{phone}` ({cflag} {cname})\n\n"
             "✅ Code sent. Enter the verification code:\n\n"
             "💡 Add spaces or dots between digits.\n"
             "Example: `1 2 3 4 5` or `1.2.3.4.5`",
@@ -1110,8 +1288,7 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
         )
 
 
-async def _handle_set_price(message: Message, text: str):
-    """Set price for a newly added number (final step of add flow)."""
+async def _handle_set_country_price(message: Message, text: str):
     user_id = message.from_user.id
     state = auth_states[user_id]
 
@@ -1124,54 +1301,65 @@ async def _handle_set_price(message: Message, text: str):
         await message.reply("❌ Send a number (e.g. `1`, `5`, `10`):")
         return
 
-    phone = state["phone"]
-    await db.save_session(phone, state["session_string"], user_id,
-                          password=state.get("password", ""), price=price)
+    cc = state["country_code"]
+    await db.set_country_price(cc, price)
     auth_states.pop(user_id, None)
+
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
     await message.reply(
-        f"✅ **Number added successfully!**\n\n"
-        f"📱 `{phone}` is now being monitored.\n"
-        f"💰 Price: **{price}** credits per OTP",
+        f"✅ Price for {flag} **{name}** updated to **{price}** credits per OTP.",
         reply_markup=back_kb("admin_panel"),
     )
 
 
-async def _handle_modify_price(message: Message, text: str):
-    """Modify price of an existing number."""
+async def _handle_manual_country(message: Message, text: str):
     user_id = message.from_user.id
     state = auth_states[user_id]
 
-    try:
-        price = int(text)
-        if price < 1:
-            await message.reply("❌ Price must be at least 1. Try again:")
-            return
-    except ValueError:
-        await message.reply("❌ Send a number (e.g. `1`, `5`, `10`):")
+    matches = search_country(text)
+    if not matches:
+        await message.reply(
+            "❌ No matching country found.\n"
+            "Try the full country name (e.g. `India`) or send its flag emoji 🇮🇳:",
+        )
         return
 
-    phone = state["phone"]
-    await db.set_session_price(phone, price)
-    auth_states.pop(user_id, None)
+    if len(matches) == 1:
+        cc, name, flag = matches[0]
+        state["country_code"] = cc
+        state["step"] = "confirm_country"
+        await message.reply(
+            f"🌍 Found: {flag} **{name}** ({cc})\n\n"
+            f"Confirm this country for `{state['phone']}`?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"✅ Yes, {flag} {name}", callback_data=f"cc_pick:{cc}"),
+                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
+                ],
+            ]),
+        )
+        return
+
+    buttons = [
+        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"cc_pick:{cc}")]
+        for cc, name, flag in matches
+    ]
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")])
     await message.reply(
-        f"✅ Price for `{phone}` updated to **{price}** credits.",
-        reply_markup=back_kb("admin_panel"),
+        "🌍 **Multiple matches found.** Pick one:",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 async def _handle_update_password_old(message: Message, text: str):
-    """Admin provides old/current password, then we ask for new one."""
     user_id = message.from_user.id
-
     auth_states[user_id]["old_password"] = text.strip()
     auth_states[user_id]["step"] = "update_password_new"
-    await message.reply(
-        "✅ Got it. Now send the **new 2FA password**:",
-    )
+    await message.reply("✅ Got it. Now send the **new 2FA password**:")
 
 
 async def _handle_update_password_new(message: Message, text: str):
-    """Admin sets the new password after providing the old one."""
     user_id = message.from_user.id
     state = auth_states[user_id]
     client: Client = state["client"]
@@ -1275,7 +1463,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     plan = CRYPTO_PLANS.get(plan_key)
     if not plan:
         pay_states.pop(user_id, None)
-        await safe_edit(status_msg,"❌ Invalid plan.", reply_markup=back_kb("main_menu"))
+        await safe_edit(status_msg, "❌ Invalid plan.", reply_markup=back_kb("main_menu"))
         return
 
     ok, reason = await asyncio.to_thread(
@@ -1283,7 +1471,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     )
 
     if not ok:
-        await safe_edit(status_msg,f"❌ Verification failed: {reason}")
+        await safe_edit(status_msg, f"❌ Verification failed: {reason}")
         return
 
     pay_states.pop(user_id, None)

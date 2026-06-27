@@ -5,7 +5,7 @@ from pyrogram.handlers import MessageHandler
 
 from config import API_ID, API_HASH
 import database as db
-from utils import extract_otp
+from utils import extract_otp, detect_country
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def _on_new_message(client: Client, message):
 
     log.info("[%s] New message from 777000: %s", phone, text[:150])
 
-    code = extract_otp(text)
+    code = extract_otp(text, from_service=True)
     log.info("[%s] OTP extraction: %s", phone, code)
 
     req = active_requests.get(phone)
@@ -50,7 +50,8 @@ async def _on_new_message(client: Client, message):
 
     if code:
         session = await db.get_session(phone)
-        price = session.get("price", 1) if session else 1
+        country = session.get("country_code", "XX") if session else "XX"
+        price = await db.get_country_price(country)
 
         credits = await db.get_credits(user_id)
         if credits < price:
@@ -188,11 +189,22 @@ async def remove_client(phone: str):
 
 
 async def validate_sessions():
-    """On startup, just verify sessions exist in DB. Don't connect them."""
+    """On startup, verify sessions exist and backfill missing country codes."""
     sessions = await db.get_active_sessions()
     log.info("Found %d session(s) in DB (will connect on assignment)", len(sessions))
     for s in sessions:
-        log.info("  %s — status=%s price=%d", s["phone_number"], s.get("status"), s.get("price", 1))
+        phone = s["phone_number"]
+        cc = s.get("country_code")
+        if not cc or cc == "XX":
+            detected, _, _ = detect_country(phone)
+            if detected != "XX" or not cc:
+                await db.db.sessions.update_one(
+                    {"phone_number": phone},
+                    {"$set": {"country_code": detected}},
+                )
+                cc = detected
+                log.info("  %s — backfilled country=%s", phone, cc)
+        log.info("  %s — status=%s country=%s", phone, s.get("status"), cc)
 
 
 async def verify_session(phone: str, session_string: str) -> tuple[bool, str]:

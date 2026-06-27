@@ -76,14 +76,39 @@ async def deduct_credit(telegram_id: int) -> bool:
     return result.modified_count > 0
 
 
+# ── Country Pricing ──
+
+async def set_country_price(country_code: str, price: int):
+    await db.country_pricing.update_one(
+        {"country_code": country_code},
+        {"$set": {"country_code": country_code, "price": price}},
+        upsert=True,
+    )
+
+
+async def get_country_price(country_code: str) -> int:
+    doc = await db.country_pricing.find_one({"country_code": country_code})
+    if doc:
+        return doc.get("price", 1)
+    return 1
+
+
+async def get_all_country_prices() -> dict:
+    result = {}
+    async for doc in db.country_pricing.find():
+        result[doc["country_code"]] = doc["price"]
+    return result
+
+
 # ── Sessions ──
 
-async def save_session(phone_number: str, session_string: str, added_by: int, password: str = "", price: int = 1):
+async def save_session(phone_number: str, session_string: str, added_by: int,
+                       password: str = "", country_code: str = "XX"):
     doc = {
         "phone_number": phone_number,
         "session_string": session_string,
         "password": password,
-        "price": price,
+        "country_code": country_code,
         "is_active": True,
         "status": "active",
         "added_by": added_by,
@@ -109,6 +134,15 @@ async def get_active_sessions():
     return await db.sessions.find({"status": "active"}).to_list(None)
 
 
+async def get_active_sessions_by_country(country_code: str):
+    if country_code == "XX":
+        return await db.sessions.find({
+            "status": "active",
+            "$or": [{"country_code": "XX"}, {"country_code": {"$exists": False}}],
+        }).to_list(None)
+    return await db.sessions.find({"status": "active", "country_code": country_code}).to_list(None)
+
+
 async def remove_session(phone_number: str):
     await db.sessions.delete_one({"phone_number": phone_number})
 
@@ -120,13 +154,6 @@ async def mark_session_sold(phone_number: str, sold_to: int):
     )
 
 
-async def set_session_price(phone_number: str, price: int):
-    await db.sessions.update_one(
-        {"phone_number": phone_number},
-        {"$set": {"price": price}},
-    )
-
-
 async def set_session_password(phone_number: str, password: str):
     await db.sessions.update_one(
         {"phone_number": phone_number},
@@ -135,20 +162,16 @@ async def set_session_password(phone_number: str, password: str):
 
 
 async def set_session_status(phone_number: str, status: str, error: str = ""):
-    update = {"status": status}
     if error:
-        update["last_error"] = error
+        await db.sessions.update_one(
+            {"phone_number": phone_number},
+            {"$set": {"status": status, "last_error": error}},
+        )
     else:
-        update.pop("last_error", None)
         await db.sessions.update_one(
             {"phone_number": phone_number},
             {"$set": {"status": status}, "$unset": {"last_error": ""}},
         )
-        return
-    await db.sessions.update_one(
-        {"phone_number": phone_number},
-        {"$set": update},
-    )
 
 
 # ── OTP History ──
