@@ -134,6 +134,7 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
             InlineKeyboardButton("📊 Stats", callback_data="stats"),
         ],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast_help")],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
     ])
 
@@ -371,7 +372,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "addcred",
+        "start", "help", "cancel", "addcred", "broadcast",
     ]))
     async def on_text(_, message: Message):
         user_id = message.from_user.id
@@ -926,6 +927,71 @@ def _register_handlers(app: Client):
         except Exception:
             pass
 
+    # ── Broadcast ──
+
+    @app.on_callback_query(filters.regex("^broadcast_help$"))
+    async def cb_broadcast_help(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+        await safe_edit(cq.message,
+            "📢 **Broadcast Message**\n\n"
+            "Reply to any message with:\n\n"
+            "`/broadcast` — copies the message to all users (no sender shown)\n"
+            "`/broadcast -name` — forwards the message (original sender visible)\n\n"
+            "📌 Must be used as a **reply** to the message you want to broadcast.",
+            reply_markup=back_kb("admin_panel"),
+        )
+
+    @app.on_message(filters.command("broadcast") & filters.private)
+    async def cmd_broadcast(_, message: Message):
+        if not await db.is_admin(message.from_user.id):
+            await message.reply("⛔ Admin only.")
+            return
+
+        target = message.reply_to_message
+        if not target:
+            await message.reply(
+                "❌ **Reply to a message** to broadcast it.\n\n"
+                "`/broadcast` — copy (no sender shown)\n"
+                "`/broadcast -name` — forward (sender visible)"
+            )
+            return
+
+        args = message.text.split(None, 1)
+        flag = args[1].strip().lower() if len(args) > 1 else ""
+        include_name = flag == "-name"
+
+        if flag and not include_name:
+            await message.reply("❌ Unknown flag. Use `/broadcast` or `/broadcast -name`.")
+            return
+
+        users = await db.get_all_users()
+        status_msg = await message.reply(f"⏳ Broadcasting to {len(users)} users...")
+
+        sent = 0
+        failed = 0
+        for user in users:
+            uid = user.get("telegram_id")
+            if not uid:
+                continue
+            try:
+                if include_name:
+                    await target.forward(uid)
+                else:
+                    await target.copy(uid)
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)  # ~20 msg/s, within Telegram limits
+
+        await safe_edit(
+            status_msg,
+            f"✅ **Broadcast complete!**\n\n"
+            f"📨 Sent: **{sent}**\n"
+            f"❌ Failed: **{failed}**",
+        )
+
     # ── Stats ──
 
     @app.on_callback_query(filters.regex("^stats$"))
@@ -1434,6 +1500,13 @@ def _register_handlers(app: Client):
 
     @app.on_message(filters.command("help") & filters.private)
     async def cmd_help(_, message: Message):
+        is_adm = await db.is_admin(message.from_user.id)
+        admin_section = (
+            "\n**Admin Commands:**\n"
+            "/addcred <userid> <credits> — Add credits to a user\n"
+            "/broadcast <message> — Broadcast to all users (no name)\n"
+            "/broadcast -name <message> — Broadcast with your name\n"
+        ) if is_adm else ""
         await message.reply(
             "**OTP Bot Help**\n\n"
             "/start — Main menu\n"
@@ -1443,7 +1516,8 @@ def _register_handlers(app: Client):
             "1. Admin adds Telegram numbers via the bot\n"
             "2. Select a country, then pick a number\n"
             "3. OTP messages arriving on that number are forwarded to you\n"
-            "4. The number auto-releases after timeout",
+            "4. The number auto-releases after timeout"
+            f"{admin_section}",
         )
 
     @app.on_message(filters.command("cancel") & filters.private)
