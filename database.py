@@ -103,7 +103,8 @@ async def get_all_country_prices() -> dict:
 # ── Sessions ──
 
 async def save_session(phone_number: str, session_string: str, added_by: int,
-                       password: str = "", country_code: str = "XX"):
+                       password: str = "", country_code: str = "XX",
+                       account_id: int = None, account_year: int = None):
     doc = {
         "phone_number": phone_number,
         "session_string": session_string,
@@ -114,6 +115,10 @@ async def save_session(phone_number: str, session_string: str, added_by: int,
         "added_by": added_by,
         "created_at": datetime.now(timezone.utc),
     }
+    if account_id is not None:
+        doc["account_id"] = account_id
+    if account_year is not None:
+        doc["account_year"] = account_year
     await db.sessions.update_one(
         {"phone_number": phone_number},
         {"$set": doc},
