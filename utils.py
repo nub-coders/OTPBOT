@@ -14,12 +14,7 @@ def extract_otp(text: str, from_service: bool = False) -> str | None:
 
     if from_service:
         codes = re.findall(r"\b(\d{5})\b", text)
-        if codes:
-            return codes[0]
-        codes = re.findall(r"\b(\d{4,8})\b", text)
-        if codes:
-            return codes[0]
-        return None
+        return codes[0] if codes else None
 
     text_lower = text.lower()
     has_keyword = any(kw in text_lower for kw in OTP_KEYWORDS)

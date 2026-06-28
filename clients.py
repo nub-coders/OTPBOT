@@ -73,10 +73,10 @@ async def _on_new_message(client: Client, message):
             except Exception as e:
                 log.error("[%s] Failed to forward OTP to %d: %s", phone, user_id, e)
 
-        release_number(phone)
-        await db.mark_session_sold(phone, user_id)
-        asyncio.create_task(stop_session(phone))
-        log.info("[%s] Marked as sold", phone)
+        req_info = active_requests.get(phone)
+        if req_info:
+            req_info["otp_received"] = True
+        log.info("[%s] OTP delivered, session stays active until timeout/release", phone)
     else:
         if bot_app:
             try:
@@ -91,20 +91,22 @@ async def _on_new_message(client: Client, message):
                 log.error("[%s] Failed to forward msg to %d: %s", phone, user_id, e)
 
 
-def assign_number(phone: str, user_id: int, timeout: int = 300):
+def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1):
     if phone in active_requests and active_requests[phone].get("timer"):
         active_requests[phone]["timer"].cancel()
 
     loop = asyncio.get_event_loop()
-    timer = loop.call_later(timeout, lambda: release_number(phone))
+    timer = loop.call_later(timeout, lambda: asyncio.create_task(_on_timeout(phone)))
     active_requests[phone] = {
         "user_id": user_id,
         "timer": timer,
+        "price": price,
+        "otp_received": False,
     }
-    log.info("[%s] Assigned to user %d (timeout=%ds)", phone, user_id, timeout)
+    log.info("[%s] Assigned to user %d (timeout=%ds, price=%d)", phone, user_id, timeout, price)
 
 
-def release_number(phone: str):
+def release_number(phone: str) -> dict | None:
     req = active_requests.pop(phone, None)
     if req:
         if req.get("timer"):
@@ -112,6 +114,40 @@ def release_number(phone: str):
         log.info("[%s] Released (was user %d)", phone, req["user_id"])
     else:
         log.info("[%s] Release called but no active request", phone)
+    return req
+
+
+async def _on_timeout(phone: str):
+    req = active_requests.pop(phone, None)
+    if not req:
+        return
+    if req.get("timer"):
+        req["timer"].cancel()
+
+    user_id = req["user_id"]
+    price = req.get("price", 0)
+    otp_received = req.get("otp_received", False)
+
+    if otp_received:
+        await db.mark_session_sold(phone, user_id)
+        log.info("[%s] Timeout — OTP was received, marked sold", phone)
+    else:
+        if price > 0:
+            await db.add_credits(user_id, price)
+        log.info("[%s] Timeout — no OTP, refunded %d credits to user %d", phone, price, user_id)
+        if bot_app:
+            try:
+                await bot_app.send_message(
+                    user_id,
+                    f"⏱ **Session expired** for `{phone}`\n\n"
+                    f"No OTP was received.\n"
+                    f"💰 **{price} credits** refunded.",
+                )
+            except Exception as e:
+                log.error("[%s] Failed to notify timeout: %s", phone, e)
+
+    await stop_session(phone)
+    log.info("[%s] Timeout cleanup complete", phone)
 
 
 def get_request_user(phone: str) -> int | None:

@@ -395,10 +395,6 @@ def _register_handlers(app: Client):
             await _handle_password(message, text)
         elif step == "update_category_price_input":
             await _handle_update_category_price(message, text)
-        elif step == "addcat_year":
-            await _handle_addcat_year(message, text)
-        elif step == "addcat_price":
-            await _handle_addcat_price(message, text)
         elif step == "manual_country":
             await _handle_manual_country(message, text)
         elif step == "update_password_old":
@@ -1069,6 +1065,11 @@ def _register_handlers(app: Client):
     async def cb_select_number(_, cq: CallbackQuery):
         phone = cq.data.split(":", 1)[1]
 
+        user = await db.get_user(cq.from_user.id)
+        if not user:
+            await cq.answer("Please /start the bot first.", show_alert=True)
+            return
+
         session = await db.get_session(phone)
         if not session or session.get("status") != "active":
             await cq.answer("❌ Number not available.", show_alert=True)
@@ -1122,11 +1123,16 @@ def _register_handlers(app: Client):
                 )
                 return
 
-        for _ in range(price):
-            await db.deduct_credit(cq.from_user.id)
+        if not await db.deduct_credits(cq.from_user.id, price):
+            await clients.stop_session(phone)
+            await safe_edit(cq.message,
+                "❌ Failed to deduct credits. Try again.",
+                reply_markup=back_kb("main_menu"),
+            )
+            return
         log.info("Deducted %d credits from user %d on selection", price, cq.from_user.id)
 
-        clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT)
+        clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT, price)
 
         flag = get_country_flag(cc)
         name = get_country_name(cc)
@@ -1155,19 +1161,35 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^release:"))
     async def cb_release(_, cq: CallbackQuery):
         phone = cq.data.split(":", 1)[1]
-        assigned = clients.get_request_user(phone)
-        if assigned != cq.from_user.id and not await db.is_admin(cq.from_user.id):
+        req = clients.active_requests.get(phone)
+        if not req:
+            await cq.answer("No active assignment.", show_alert=True)
+            return
+        if req["user_id"] != cq.from_user.id and not await db.is_admin(cq.from_user.id):
             await cq.answer("Not your assignment.", show_alert=True)
             return
 
+        otp_received = req.get("otp_received", False)
+        price = req.get("price", 0)
+        user_id = req["user_id"]
+
         clients.release_number(phone)
         await clients.stop_session(phone)
-        await cq.answer("Your credits will be refunded in 2 hours.", show_alert=True)
-        await safe_edit(cq.message,
-            f"🔓 `{mask_phone(phone)}` released.\n\n"
-            "💰 Credits will be refunded within 2 hours.",
-            reply_markup=back_kb("main_menu"),
-        )
+
+        if otp_received:
+            await db.mark_session_sold(phone, user_id)
+            await safe_edit(cq.message,
+                f"🔓 `{mask_phone(phone)}` released.",
+                reply_markup=back_kb("main_menu"),
+            )
+        else:
+            if price > 0:
+                await db.add_credits(user_id, price)
+            await safe_edit(cq.message,
+                f"🔓 `{mask_phone(phone)}` released.\n\n"
+                f"💰 **{price} credits** refunded.",
+                reply_markup=back_kb("main_menu"),
+            )
 
     # ── OTP History ──
 
