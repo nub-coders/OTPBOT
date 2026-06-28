@@ -20,7 +20,7 @@ from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPT
 import database as db
 import clients
 import payments
-from utils import detect_country, get_country_flag, get_country_name, search_country
+from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +186,7 @@ def _register_handlers(app: Client):
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc)
+        await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
         auth_states.pop(cq.from_user.id, None)
 
         price = await db.get_country_price(cc)
@@ -227,6 +228,7 @@ def _register_handlers(app: Client):
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc)
+        await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
         auth_states.pop(cq.from_user.id, None)
 
         price = await db.get_country_price(cc)
@@ -371,7 +373,9 @@ def _register_handlers(app: Client):
                 assigned = clients.get_request_user(phone)
                 assigned_text = f" → user `{assigned}`" if assigned else ""
                 error_text = f"\n  └ ❗ {s['last_error'][:80]}" if s.get("last_error") else ""
-                lines.append(f"  {status_icon} `{phone}`{assigned_text}{error_text}")
+                acc_year = s.get("account_year")
+                age_text = f" — 📅 ~{acc_year}" if acc_year else ""
+                lines.append(f"  {status_icon} `{phone}`{age_text}{assigned_text}{error_text}")
                 buttons.append([
                     InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}"),
                 ])
@@ -432,12 +436,15 @@ def _register_handlers(app: Client):
         status = session.get("status", "unknown")
         pwd = session.get("password", "")
         error = session.get("last_error", "")
+        acc_year = session.get("account_year")
+        age_line = f"📅 **Account:** created ~{acc_year}\n" if acc_year else ""
 
         info = (
             f"📱 **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"📊 Status: **{status}**\n"
             f"💰 Country price: **{price}** credits\n"
+            f"{age_line}"
             f"🔐 Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
         )
         if error:
@@ -826,12 +833,14 @@ def _register_handlers(app: Client):
         credit_line = f"\n💰 Credits: {credits}"
         pwd = session.get("password", "")
         pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
+        acc_year = session.get("account_year")
+        age_line = f"\n📅 Account created: ~{acc_year}" if acc_year else ""
         await safe_edit(cq.message,
             f"✅ **Number assigned!**\n\n"
             f"{flag} {name}\n"
             f"📱 `{phone}`\n"
             f"💰 Price: **{price}** credits per OTP\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} min{credit_line}{pwd_line}\n\n"
+            f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{credit_line}{pwd_line}\n\n"
             "Any OTP received on this number will be forwarded to you.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Release Number", callback_data=f"release:{phone}")],
@@ -1080,6 +1089,15 @@ def _register_handlers(app: Client):
 
 # ── Auth helpers ──
 
+async def _account_info(client: Client) -> tuple[int | None, int | None]:
+    """Fetch account id + estimated creation year from a connected client."""
+    try:
+        me = await client.get_me()
+        return me.id, estimate_account_year(me.id)
+    except Exception:
+        return None, None
+
+
 async def _handle_phone(message: Message, phone: str):
     user_id = message.from_user.id
     if not phone.startswith("+"):
@@ -1146,6 +1164,7 @@ async def _handle_code(message: Message, code: str):
             phone_code_hash=state["phone_code_hash"],
             phone_code=clean_code,
         )
+        acc_id, acc_year = await _account_info(client)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -1156,6 +1175,8 @@ async def _handle_code(message: Message, code: str):
             "session_string": session_string,
             "password": "",
             "country_code": cc,
+            "account_id": acc_id,
+            "account_year": acc_year,
         }
         await safe_edit(status_msg,
             f"✅ Code verified for `{phone}`\n\n"
@@ -1208,6 +1229,7 @@ async def _handle_password(message: Message, password: str):
 
     try:
         await client.check_password(password)
+        acc_id, acc_year = await _account_info(client)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -1218,6 +1240,8 @@ async def _handle_password(message: Message, password: str):
             "session_string": session_string,
             "password": password,
             "country_code": cc,
+            "account_id": acc_id,
+            "account_year": acc_year,
         }
         await safe_edit(status_msg,
             f"✅ Password accepted for `{phone}`\n\n"

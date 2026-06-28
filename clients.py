@@ -5,7 +5,7 @@ from pyrogram.handlers import MessageHandler
 
 from config import API_ID, API_HASH
 import database as db
-from utils import extract_otp, detect_country
+from utils import extract_otp, detect_country, estimate_account_year
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +161,9 @@ async def start_session(phone: str, session_string: str):
 
     try:
         me = await client.get_me()
-        log.info("[%s] Logged in as %s (ID: %d)", phone, me.first_name, me.id)
+        year = estimate_account_year(me.id)
+        await db.set_session_account_info(phone, me.id, year)
+        log.info("[%s] Logged in as %s (ID: %d, ~%s)", phone, me.first_name, me.id, year)
     except Exception as e:
         log.warning("[%s] get_me failed: %s", phone, e)
 
@@ -220,7 +222,9 @@ async def verify_session(phone: str, session_string: str) -> tuple[bool, str]:
     try:
         await client.start()
         me = await client.get_me()
-        log.info("[%s] Verified OK — %s (ID: %d)", phone, me.first_name, me.id)
+        year = estimate_account_year(me.id)
+        await db.set_session_account_info(phone, me.id, year)
+        log.info("[%s] Verified OK — %s (ID: %d, ~%s)", phone, me.first_name, me.id, year)
         await client.stop()
         return True, ""
     except Exception as e:
