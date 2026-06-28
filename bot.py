@@ -145,6 +145,21 @@ def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     ])
 
 
+def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, *, pick: bool = False) -> InlineKeyboardMarkup:
+    """Country-confirm keyboard with an inline account-year adjuster row."""
+    yes_cb = f"cc_pick:{cc}" if pick else "cc_yes"
+    year_label = str(year) if year else "Unknown"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data=yes_cb),
+            InlineKeyboardButton("❌ No", callback_data="cc_no"),
+        ],
+        [
+            InlineKeyboardButton("📅 Account Year: " + year_label, callback_data="ay_edit"),
+        ],
+    ])
+
+
 PAGE_SIZE = 25
 
 
@@ -265,6 +280,77 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, "❌ Cancelled.", reply_markup=back_kb("admin_panel"))
 
     # ── Country confirmation after adding number ──
+
+    # ── Account Year Adjuster ──
+
+    @app.on_callback_query(filters.regex("^ay_edit$"))
+    async def cb_ay_edit(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "confirm_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+        year = state.get("account_year")
+        year_label = str(year) if year else "Unknown"
+        await safe_edit(cq.message,
+            f"📅 **Adjust Account Year**\n\n"
+            f"Auto-detected: **{year_label}**\n"
+            f"Use + / − to correct it, then tap **Set**.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➖", callback_data="ay_adj:-1"),
+                    InlineKeyboardButton(year_label, callback_data="noop"),
+                    InlineKeyboardButton("➕", callback_data="ay_adj:+1"),
+                ],
+                [InlineKeyboardButton("✅ Set", callback_data="ay_set")],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^ay_adj:"))
+    async def cb_ay_adj(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "confirm_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+        delta = int(cq.data.split(":")[1])
+        current = state.get("account_year") or 2013
+        new_year = current + delta
+        state["account_year"] = new_year
+        year_label = str(new_year)
+        await safe_edit(cq.message,
+            f"📅 **Adjust Account Year**\n\n"
+            f"Use + / − to correct it, then tap **Set**.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➖", callback_data="ay_adj:-1"),
+                    InlineKeyboardButton(year_label, callback_data="noop"),
+                    InlineKeyboardButton("➕", callback_data="ay_adj:+1"),
+                ],
+                [InlineKeyboardButton("✅ Set", callback_data="ay_set")],
+            ]),
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^ay_set$"))
+    async def cb_ay_set(_, cq: CallbackQuery):
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "confirm_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+        cc = state["country_code"]
+        year = state.get("account_year")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        phone = state["phone"]
+        await safe_edit(cq.message,
+            f"✅ **Account year set to {year}**\n\n"
+            f"📱 `{phone}`\n"
+            f"🌍 Country: {flag} **{name}** ({cc})\n\n"
+            "Confirm and save?",
+            reply_markup=_confirm_country_kb(flag, name, cc, year),
+        )
+        await cq.answer(f"Year set to {year}")
+
+    # ── Country confirmation ──
 
     @app.on_callback_query(filters.regex("^cc_yes$"))
     async def cb_cc_yes(_, cq: CallbackQuery):
@@ -1637,14 +1723,10 @@ async def _handle_code(message: Message, code: str):
         }
         await safe_edit(status_msg,
             f"✅ Code verified for `{phone}`\n\n"
-            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n\n"
+            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
+            f"📅 Account year: **{acc_year or 'Unknown'}**\n\n"
             "Is this correct?",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data="cc_yes"),
-                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
-                ],
-            ]),
+            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
     except SessionPasswordNeeded:
         auth_states[user_id]["step"] = "password"
@@ -1703,14 +1785,10 @@ async def _handle_password(message: Message, password: str):
         }
         await safe_edit(status_msg,
             f"✅ Password accepted for `{phone}`\n\n"
-            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n\n"
+            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
+            f"📅 Account year: **{acc_year or 'Unknown'}**\n\n"
             "Is this correct?",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data="cc_yes"),
-                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
-                ],
-            ]),
+            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
     except PasswordHashInvalid:
         await safe_edit(status_msg, "❌ Wrong password. Try again:")
@@ -1822,15 +1900,12 @@ async def _handle_manual_country(message: Message, text: str):
         cc, name, flag = matches[0]
         state["country_code"] = cc
         state["step"] = "confirm_country"
+        year = state.get("account_year")
         await message.reply(
-            f"🌍 Found: {flag} **{name}** ({cc})\n\n"
+            f"🌍 Found: {flag} **{name}** ({cc})\n"
+            f"📅 Account year: **{year or 'Unknown'}**\n\n"
             f"Confirm this country for `{state['phone']}`?",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"✅ Yes, {flag} {name}", callback_data=f"cc_pick:{cc}"),
-                    InlineKeyboardButton("❌ No", callback_data="cc_no"),
-                ],
-            ]),
+            reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
         )
         return
 
