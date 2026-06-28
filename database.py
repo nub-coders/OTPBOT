@@ -1,5 +1,5 @@
 import motor.motor_asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import MONGODB_URI, ADMIN_IDS
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
@@ -97,8 +97,8 @@ async def set_country_price(country_code: str, price: int):
 async def get_country_price(country_code: str) -> int:
     doc = await db.country_pricing.find_one({"country_code": country_code})
     if doc:
-        return doc.get("price", 1)
-    return 1
+        return doc.get("price", 50)
+    return 50
 
 
 async def get_all_country_prices() -> dict:
@@ -187,6 +187,22 @@ async def set_session_account_info(phone_number: str, account_id: int, account_y
     )
 
 
+async def set_session_category(phone_number: str, country_code: str = None,
+                               account_year: int = None, email_added: bool = None):
+    update_doc = {}
+    if country_code is not None:
+        update_doc["country_code"] = country_code
+    if account_year is not None:
+        update_doc["account_year"] = account_year
+    if email_added is not None:
+        update_doc["email_added"] = email_added
+    if update_doc:
+        await db.sessions.update_one(
+            {"phone_number": phone_number},
+            {"$set": update_doc},
+        )
+
+
 async def set_session_status(phone_number: str, status: str, error: str = ""):
     if error:
         await db.sessions.update_one(
@@ -219,6 +235,119 @@ async def get_user_otps(telegram_id: int, limit: int = 10):
     return await db.otps.find(
         {"requested_by": telegram_id}
     ).sort("created_at", -1).limit(limit).to_list(None)
+
+
+# ── Active Assignments ──
+
+async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int):
+    doc = {
+        "phone_number": phone_number,
+        "user_id": user_id,
+        "price": price,
+        "otp_received": False,
+        "assigned_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=timeout),
+    }
+    await db.active_assignments.update_one(
+        {"phone_number": phone_number},
+        {"$set": doc},
+        upsert=True,
+    )
+
+
+async def mark_assignment_otp_received(phone_number: str):
+    await db.active_assignments.update_one(
+        {"phone_number": phone_number},
+        {"$set": {"otp_received": True}},
+    )
+
+
+async def remove_active_assignment(phone_number: str):
+    await db.active_assignments.delete_one({"phone_number": phone_number})
+
+
+async def get_all_active_assignments():
+    return await db.active_assignments.find().to_list(None)
+
+
+# ── Pending Payments ──
+
+async def save_pending_payment(user_id: int, qr_id: str, plan_key: str, amount_inr: int, msg_chat_id: int, msg_id: int):
+    doc = {
+        "user_id": user_id,
+        "qr_id": qr_id,
+        "plan_key": plan_key,
+        "amount_inr": amount_inr,
+        "msg_chat_id": msg_chat_id,
+        "msg_id": msg_id,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
+    }
+    await db.pending_payments.update_one(
+        {"qr_id": qr_id},
+        {"$set": doc},
+        upsert=True,
+    )
+
+
+async def get_pending_payments():
+    return await db.pending_payments.find({"status": "pending"}).to_list(None)
+
+
+async def mark_pending_payment_done(qr_id: str):
+    await db.pending_payments.update_one(
+        {"qr_id": qr_id},
+        {"$set": {"status": "done", "paid_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def mark_pending_payment_expired(qr_id: str):
+    await db.pending_payments.update_one(
+        {"qr_id": qr_id},
+        {"$set": {"status": "expired"}},
+    )
+
+
+# ── Pending Refunds ──
+
+REFUND_DELAY_HOURS = 2
+
+
+async def save_pending_refund(user_id: int, phone_number: str, amount: int):
+    refund_at = datetime.now(timezone.utc) + timedelta(hours=REFUND_DELAY_HOURS)
+    doc = {
+        "user_id": user_id,
+        "phone_number": phone_number,
+        "amount": amount,
+        "created_at": datetime.now(timezone.utc),
+        "refund_at": refund_at,
+        "status": "pending",
+    }
+    await db.pending_refunds.insert_one(doc)
+    return doc
+
+
+async def get_due_refunds():
+    now = datetime.now(timezone.utc)
+    return await db.pending_refunds.find({
+        "status": "pending",
+        "refund_at": {"$lte": now},
+    }).to_list(None)
+
+
+async def mark_refund_done(refund_id):
+    await db.pending_refunds.update_one(
+        {"_id": refund_id},
+        {"$set": {"status": "done", "processed_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def cancel_pending_refund(phone_number: str, user_id: int):
+    await db.pending_refunds.update_many(
+        {"phone_number": phone_number, "user_id": user_id, "status": "pending"},
+        {"$set": {"status": "cancelled"}},
+    )
 
 
 # ── Stats ──

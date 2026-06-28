@@ -494,6 +494,10 @@ def _register_handlers(app: Client):
             await _handle_cr_custom_amount(message, text)
         elif step == "set_new_category_price":
             await _handle_set_new_category_price(message, text)
+        elif step == "edit_num_country":
+            await _handle_edit_num_country(message, text)
+        elif step == "edit_num_set_price":
+            await _handle_edit_num_set_price(message, text)
 
     # ── Country Pricing ──
 
@@ -767,11 +771,203 @@ def _register_handlers(app: Client):
                 InlineKeyboardButton("🔐 Update Password", callback_data=f"updpwd:{phone}"),
             ],
             [
+                InlineKeyboardButton("📝 Edit Category", callback_data=f"editnum:{phone}"),
                 InlineKeyboardButton("❌ Remove", callback_data=f"rm:{phone}"),
             ],
-            [InlineKeyboardButton("🔙 Back", callback_data="list_numbers")],
         ]
+        if status != "active":
+            buttons.insert(0, [InlineKeyboardButton(
+                "🔄 Re-list for Sale", callback_data=f"relist:{phone}",
+            )])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="list_numbers")])
         await safe_edit(cq.message, info, reply_markup=InlineKeyboardMarkup(buttons))
+
+    @app.on_callback_query(filters.regex(r"^relist:"))
+    async def cb_relist(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        await db.set_session_status(phone, "active")
+        await cq.answer("✅ Number re-listed for sale!")
+
+        cc = session.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        await safe_edit(cq.message,
+            f"✅ `{phone}` ({flag} {name}) is now **active** and available for sale.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+            ]),
+        )
+
+    # ── Edit Number Category ──
+
+    async def _edit_category_view(message, phone, session, prefix=""):
+        """Show edit category panel. If category price is missing, prompt to set it."""
+        cc = session.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        year = session.get("account_year")
+        email = session.get("email_added", False)
+        year_label = str(year) if year else "Unknown"
+        email_str = "Yes" if email else "No"
+
+        cat_price = await db.get_category_price(cc, year, email)
+        if cat_price is None:
+            auth_states[message.chat.id] = {
+                "step": "edit_num_set_price",
+                "phone": phone,
+            }
+            await safe_edit(message,
+                f"⚠️ **New Category Detected!**\n\n"
+                f"📱 Number: `{phone}`\n"
+                f"🌍 Country: {flag} **{name}** ({cc})\n"
+                f"📅 Year: **{year_label}**\n"
+                f"📧 Email Added: **{email_str}**\n\n"
+                f"No price set for this combination.\n"
+                f"Send the price (in credits) for this category:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")]
+                ]),
+            )
+            return
+
+        price = await db.get_session_price(session)
+        await safe_edit(message,
+            f"{prefix}"
+            f"📝 **Edit Category — `{phone}`**\n\n"
+            f"🌍 Country: {flag} **{name}** ({cc})\n"
+            f"📅 Account Year: **{year_label}**\n"
+            f"📧 Email Added: **{email_str}**\n"
+            f"💰 Current Price: **{price}** credits\n\n"
+            "Select what to change:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🌍 Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [
+                    InlineKeyboardButton("➖", callback_data=f"echg_yr:{phone}:-1"),
+                    InlineKeyboardButton(f"📅 Year: {year_label}", callback_data="noop"),
+                    InlineKeyboardButton("➕", callback_data=f"echg_yr:{phone}:+1"),
+                ],
+                [InlineKeyboardButton(
+                    f"📧 Email: {email_str} — Tap to toggle",
+                    callback_data=f"echg_em:{phone}",
+                )],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^editnum:"))
+    async def cb_editnum(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        await _edit_category_view(cq.message, phone, session)
+
+    @app.on_callback_query(filters.regex(r"^echg_yr:"))
+    async def cb_echg_yr(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        parts = cq.data.split(":")
+        phone = parts[1]
+        delta = int(parts[2])
+
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        current = session.get("account_year") or 2013
+        new_year = current + delta
+        await db.set_session_category(phone, account_year=new_year)
+        session["account_year"] = new_year
+
+        await _edit_category_view(cq.message, phone, session)
+        await cq.answer(f"Year set to {new_year}")
+
+    @app.on_callback_query(filters.regex(r"^echg_em:"))
+    async def cb_echg_em(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        new_email = not session.get("email_added", False)
+        await db.set_session_category(phone, email_added=new_email)
+        session["email_added"] = new_email
+
+        await _edit_category_view(cq.message, phone, session)
+        await cq.answer(f"Email toggled to {'Yes' if new_email else 'No'}")
+
+    @app.on_callback_query(filters.regex(r"^echg_cc:"))
+    async def cb_echg_cc(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        auth_states[cq.from_user.id] = {
+            "step": "edit_num_country",
+            "phone": phone,
+        }
+        await safe_edit(cq.message,
+            f"🌍 **Change Country for** `{phone}`\n\n"
+            "Type the country name or send its flag emoji:\n"
+            "Example: `India` or `🇮🇳`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^echg_ccpick:"))
+    async def cb_echg_ccpick(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        state = auth_states.get(cq.from_user.id)
+        if not state or state.get("step") != "edit_num_country":
+            await cq.answer("No pending action.", show_alert=True)
+            return
+
+        cc = cq.data.split(":", 1)[1]
+        phone = state["phone"]
+        auth_states.pop(cq.from_user.id, None)
+
+        await db.set_session_category(phone, country_code=cc)
+
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        await cq.answer(f"Country set to {flag} {name}")
+
+        session = await db.get_session(phone)
+        if session:
+            await _edit_category_view(cq.message, phone, session, prefix="✅ Country updated!\n\n")
 
     @app.on_callback_query(filters.regex(r"^verify:"))
     async def cb_verify(_, cq: CallbackQuery):
@@ -1182,20 +1378,22 @@ def _register_handlers(app: Client):
         range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
 
         all_buttons = []
-        for s in sessions:
+        for i, s in enumerate(sessions):
             phone = s["phone_number"]
             masked = mask_phone(phone)
             year = s.get("account_year")
             year_str = f" ({year})" if year else ""
+            email_icon = " 📧" if s.get("email_added") else ""
+            p = session_prices[i]
             assigned = clients.get_request_user(phone)
             if assigned:
                 all_buttons.append([
-                    InlineKeyboardButton(f"🔴 {masked}{year_str} (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"🔴 {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop")
                 ])
             else:
                 all_buttons.append([
                     InlineKeyboardButton(
-                        f"🟢 {masked}{year_str}", callback_data=f"sel:{phone}"
+                        f"🟢 {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}"
                     )
                 ])
 
@@ -1294,19 +1492,20 @@ def _register_handlers(app: Client):
         pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
         age_line = f"\n📅 Account created: ~{acc_year}" if acc_year else ""
+        email_added = session.get("email_added", False)
+        email_line = f"\n📧 Email Added: {'Yes' if email_added else 'No'}"
         support = " | ".join(SUPPORT_HANDLES)
         await safe_edit(cq.message,
             f"✅ **Number assigned!**\n\n"
             f"{flag} {name}\n"
             f"📱 `{phone}`\n"
             f"💰 Price: **{price}** credits (deducted)\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{credit_line}{pwd_line}\n\n"
+            f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}{pwd_line}\n\n"
             "Any OTP received on this number will be forwarded to you.\n\n"
             "⚠️ On manual release, your credits will be locked for 2 hours.\n\n"
             f"⚠️ Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Release Number", callback_data=f"release:{phone}")],
-                [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
             ]),
         )
 
@@ -1336,10 +1535,10 @@ def _register_handlers(app: Client):
             )
         else:
             if price > 0:
-                await db.add_credits(user_id, price)
+                await db.save_pending_refund(user_id, phone, price)
             await safe_edit(cq.message,
                 f"🔓 `{mask_phone(phone)}` released.\n\n"
-                f"💰 **{price} credits** refunded.",
+                f"💰 **{price} credits** will be refunded in **2 hours**.",
                 reply_markup=back_kb("main_menu"),
             )
 
@@ -1458,6 +1657,11 @@ def _register_handlers(app: Client):
                 "⏱ Valid for 15 minutes."
             ),
             reply_markup=buttons,
+        )
+
+        await db.save_pending_payment(
+            cq.from_user.id, qr["id"], plan_key, plan["amount_inr"],
+            qr_msg.chat.id, qr_msg.id,
         )
 
         asyncio.create_task(_razorpay_poller(
@@ -1964,6 +2168,108 @@ async def _handle_update_password_new(message: Message, text: str):
         )
 
 
+async def _handle_edit_num_country(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states[user_id]
+    phone = state["phone"]
+
+    matches = search_country(text)
+    if not matches:
+        await message.reply(
+            "❌ No matching country found.\n"
+            "Try the full country name (e.g. `India`) or send its flag emoji 🇮🇳:",
+        )
+        return
+
+    if len(matches) == 1:
+        cc, name, flag = matches[0]
+        auth_states.pop(user_id, None)
+        await db.set_session_category(phone, country_code=cc)
+
+        session = await db.get_session(phone)
+        year = session.get("account_year") if session else None
+        year_label = str(year) if year else "Unknown"
+        email = session.get("email_added", False) if session else False
+        email_str = "Yes" if email else "No"
+        price = await db.get_session_price(session) if session else 1
+
+        await message.reply(
+            f"✅ Country updated to {flag} **{name}** ({cc})\n\n"
+            f"📝 **Edit Category — `{phone}`**\n\n"
+            f"🌍 Country: {flag} **{name}** ({cc})\n"
+            f"📅 Account Year: **{year_label}**\n"
+            f"📧 Email Added: **{email_str}**\n"
+            f"💰 Current Price: **{price}** credits",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🌍 Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [
+                    InlineKeyboardButton("➖", callback_data=f"echg_yr:{phone}:-1"),
+                    InlineKeyboardButton(f"📅 Year: {year_label}", callback_data="noop"),
+                    InlineKeyboardButton("➕", callback_data=f"echg_yr:{phone}:+1"),
+                ],
+                [InlineKeyboardButton(
+                    f"📧 Email: {email_str} — Tap to toggle",
+                    callback_data=f"echg_em:{phone}",
+                )],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+            ]),
+        )
+        return
+
+    buttons = [
+        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"echg_ccpick:{cc}")]
+        for cc, name, flag in matches
+    ]
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")])
+    await message.reply(
+        "🌍 **Multiple matches found.** Pick one:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _handle_edit_num_set_price(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states[user_id]
+    try:
+        price = int(text.strip())
+        if price < 1:
+            await message.reply("❌ Price must be at least 1. Try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid price. Send a number (e.g. `50`):")
+        return
+
+    phone = state["phone"]
+    auth_states.pop(user_id, None)
+
+    session = await db.get_session(phone)
+    if not session:
+        await message.reply("❌ Number not found.", reply_markup=back_kb("admin_panel"))
+        return
+
+    cc = session.get("country_code", "XX")
+    year = session.get("account_year")
+    email = session.get("email_added", False)
+
+    await db.set_category_price(cc, year, email, price)
+
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
+    year_label = str(year) if year else "Unknown"
+    email_str = "Yes" if email else "No"
+
+    await message.reply(
+        f"✅ **Category price set!**\n\n"
+        f"🌍 Country: {flag} **{name}** ({cc})\n"
+        f"📅 Year: **{year_label}**\n"
+        f"📧 Email: **{email_str}**\n"
+        f"💰 Price: **{price}** credits per OTP",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data=f"editnum:{phone}")],
+        ]),
+    )
+
+
 # ── Payment helpers ──
 
 async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
@@ -1978,6 +2284,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             payments.check_razorpay_payment, qr_id, plan["amount_inr"],
         )
         if status == "paid":
+            await db.mark_pending_payment_done(qr_id)
             await db.add_credits(user_id, plan["credits"])
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
             new_balance = await db.get_credits(user_id)
@@ -1996,6 +2303,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
         if status == "expired":
             break
 
+    await db.mark_pending_payment_expired(qr_id)
     try:
         await qr_msg.delete()
     except Exception:
@@ -2102,6 +2410,11 @@ async def _handle_rz_custom_amount(message: Message, text: str):
             "⏱ Valid for 15 minutes."
         ),
         reply_markup=buttons,
+    )
+
+    await db.save_pending_payment(
+        user_id, qr["id"], plan_key, plan["amount_inr"],
+        qr_msg.chat.id, qr_msg.id,
     )
 
     asyncio.create_task(_razorpay_poller(

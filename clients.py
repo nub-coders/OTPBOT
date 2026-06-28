@@ -76,6 +76,7 @@ async def _on_new_message(client: Client, message):
         req_info = active_requests.get(phone)
         if req_info:
             req_info["otp_received"] = True
+        await db.mark_assignment_otp_received(phone)
         log.info("[%s] OTP delivered, session stays active until timeout/release", phone)
     else:
         if bot_app:
@@ -103,6 +104,7 @@ def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1):
         "price": price,
         "otp_received": False,
     }
+    asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout))
     log.info("[%s] Assigned to user %d (timeout=%ds, price=%d)", phone, user_id, timeout, price)
 
 
@@ -114,6 +116,7 @@ def release_number(phone: str) -> dict | None:
         log.info("[%s] Released (was user %d)", phone, req["user_id"])
     else:
         log.info("[%s] Release called but no active request", phone)
+    asyncio.create_task(db.remove_active_assignment(phone))
     return req
 
 
@@ -127,6 +130,8 @@ async def _on_timeout(phone: str):
     user_id = req["user_id"]
     price = req.get("price", 0)
     otp_received = req.get("otp_received", False)
+
+    await db.remove_active_assignment(phone)
 
     if otp_received:
         await db.mark_session_sold(phone, user_id)
