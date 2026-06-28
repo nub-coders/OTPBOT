@@ -393,8 +393,12 @@ def _register_handlers(app: Client):
             await _handle_code(message, text)
         elif step == "password":
             await _handle_password(message, text)
-        elif step == "set_country_price":
-            await _handle_set_country_price(message, text)
+        elif step == "update_category_price_input":
+            await _handle_update_category_price(message, text)
+        elif step == "addcat_year":
+            await _handle_addcat_year(message, text)
+        elif step == "addcat_price":
+            await _handle_addcat_price(message, text)
         elif step == "manual_country":
             await _handle_manual_country(message, text)
         elif step == "update_password_old":
@@ -442,11 +446,20 @@ def _register_handlers(app: Client):
         for cc in sorted(countries.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
-            price = prices.get(cc, 1)
             info = countries[cc]
-            all_lines.append(f"{flag} **{name}** ({cc}) — **{price}** cr — {info['active']}/{info['total']} numbers")
+            
+            cat_prices = await db.get_category_prices(cc)
+            if cat_prices:
+                prices_list = [c["price"] for c in cat_prices]
+                min_p = min(prices_list)
+                max_p = max(prices_list)
+                range_str = f"{min_p}-{max_p}" if min_p != max_p else f"{min_p}"
+            else:
+                range_str = str(prices.get(cc, 1))
+
+            all_lines.append(f"{flag} **{name}** ({cc}) — **({range_str} credits per OTP)** — {info['active']}/{info['total']} numbers")
             all_buttons.append([InlineKeyboardButton(
-                f"{flag} {name} — {price} cr",
+                f"{flag} {name} — {range_str} cr",
                 callback_data=f"setcprice:{cc}",
             )])
 
@@ -465,18 +478,107 @@ def _register_handlers(app: Client):
             return
 
         cc = cq.data.split(":", 1)[1]
-        price = await db.get_country_price(cc)
         flag = get_country_flag(cc)
         name = get_country_name(cc)
 
-        auth_states[cq.from_user.id] = {"step": "set_country_price", "country_code": cc}
+        cat_prices = await db.get_category_prices(cc)
+        
+        buttons = []
+        lines = []
+        
+        if not cat_prices:
+            lines.append("No category prices configured yet.")
+        else:
+            for cat in cat_prices:
+                year = cat.get("year", 2025)
+                email = cat.get("email_added", False)
+                price = cat.get("price", 1)
+                email_str = "Yes" if email else "No"
+                
+                lines.append(f"📅 Year: **{year}** | 📧 Email: **{email_str}** — **{price}** cr")
+                buttons.append([InlineKeyboardButton(
+                    f"✏️ {year} | Email: {email_str} — {price} cr",
+                    callback_data=f"editcat:{cc}:{year}:{email}",
+                )])
+        
+        buttons.append([InlineKeyboardButton("➕ Add New Category Price", callback_data=f"addcat:{cc}")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="country_pricing")])
+
         await safe_edit(cq.message,
-            f"💰 **Set Price for {flag} {name}**\n\n"
-            f"Current price: **{price}** credits per OTP\n\n"
-            "Send the new price:",
+            f"💰 **Category Pricing — {flag} {name} ({cc})**\n\n" + "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^editcat:"))
+    async def cb_editcat(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        parts = cq.data.split(":")
+        cc = parts[1]
+        year = int(parts[2])
+        email = parts[3] == "True"
+        
+        auth_states[cq.from_user.id] = {
+            "step": "update_category_price_input",
+            "country_code": cc,
+            "year": year,
+            "email_added": email,
+        }
+        
+        email_str = "Yes" if email else "No"
+        await safe_edit(cq.message,
+            f"💰 **Update Category Price**\n\n"
+            f"🌍 Country: {get_country_flag(cc)} {get_country_name(cc)}\n"
+            f"📅 Year: **{year}**\n"
+            f"📧 Email Added: **{email_str}**\n\n"
+            f"Send the new price (in credits) for this category:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="country_pricing")],
-            ]),
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{cc}")]
+            ])
+        )
+
+    @app.on_callback_query(filters.regex(r"^addcat:"))
+    async def cb_addcat(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        cc = cq.data.split(":", 1)[1]
+        auth_states[cq.from_user.id] = {
+            "step": "addcat_year",
+            "country_code": cc,
+        }
+        await safe_edit(cq.message,
+            "📅 **Add Category Price — Step 1**\n\n"
+            "Send the account creation year (e.g. `2021`):",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{cc}")]
+            ])
+        )
+
+    @app.on_callback_query(filters.regex(r"^addcat_email_choice:"))
+    async def cb_addcat_email_choice(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        email = cq.data.split(":", 1)[1] == "True"
+        state = auth_states.get(cq.from_user.id)
+        if not state:
+            await cq.answer("No pending action.", show_alert=True)
+            return
+            
+        state["email_added"] = email
+        state["step"] = "addcat_price"
+        
+        await safe_edit(cq.message,
+            "💰 **Add Category Price — Step 3**\n\n"
+            "Send the price (in credits) for this category:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{state['country_code']}")]
+            ])
         )
 
     # ── List Numbers (Admin) ──
@@ -1615,28 +1717,97 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
         )
 
 
-async def _handle_set_country_price(message: Message, text: str):
+async def _handle_update_category_price(message: Message, text: str):
     user_id = message.from_user.id
     state = auth_states[user_id]
-
     try:
-        price = int(text)
+        price = int(text.strip())
         if price < 1:
             await message.reply("❌ Price must be at least 1. Try again:")
             return
     except ValueError:
-        await message.reply("❌ Send a number (e.g. `1`, `5`, `10`):")
+        await message.reply("❌ Invalid price. Send a number (e.g. `220`):")
         return
-
+        
     cc = state["country_code"]
-    await db.set_country_price(cc, price)
+    year = state["year"]
+    email = state["email_added"]
+    
+    await db.set_category_price(cc, year, email, price)
     auth_states.pop(user_id, None)
-
+    
     flag = get_country_flag(cc)
     name = get_country_name(cc)
+    email_str = "Yes" if email else "No"
+    
     await message.reply(
-        f"✅ Price for {flag} **{name}** updated to **{price}** credits per OTP.",
-        reply_markup=back_kb("admin_panel"),
+        f"✅ Category price successfully updated!\n\n"
+        f"🌍 Country: {flag} **{name}** ({cc})\n"
+        f"📅 Year: **{year}**\n"
+        f"📧 Email: **{email_str}**\n"
+        f"💰 New Price: **{price}** credits per OTP",
+        reply_markup=main_menu_kb(True),
+    )
+
+
+async def _handle_addcat_year(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states[user_id]
+    try:
+        year = int(text.strip())
+        if year < 2010 or year > 2030:
+            await message.reply("❌ Year must be between 2010 and 2030. Try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid year. Send a year (e.g. `2021`):")
+        return
+        
+    state["year"] = year
+    state["step"] = "addcat_email"
+    
+    await message.reply(
+        "📧 **Add Category Price — Step 2**\n\n"
+        "Is email added on this category?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Yes", callback_data="addcat_email_choice:True"),
+                InlineKeyboardButton("❌ No", callback_data="addcat_email_choice:False"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{state['country_code']}")]
+        ])
+    )
+
+
+async def _handle_addcat_price(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states[user_id]
+    try:
+        price = int(text.strip())
+        if price < 1:
+            await message.reply("❌ Price must be at least 1. Try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid price. Send a number (e.g. `220`):")
+        return
+        
+    cc = state["country_code"]
+    year = state["year"]
+    email = state["email_added"]
+    
+    await db.set_category_price(cc, year, email, price)
+    auth_states.pop(user_id, None)
+    
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
+    email_str = "Yes" if email else "No"
+    
+    await message.reply(
+        f"✅ Category price successfully set!\n\n"
+        f"🌍 Country: {flag} **{name}** ({cc})\n"
+        f"📅 Year: **{year}**\n"
+        f"📧 Email: **{email_str}**\n"
+        f"💰 Price: **{price}** credits per OTP",
+        reply_markup=main_menu_kb(True),
     )
 
 
