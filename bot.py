@@ -501,7 +501,6 @@ def _register_handlers(app: Client):
                     callback_data=f"editcat:{cc}:{year}:{email}",
                 )])
         
-        buttons.append([InlineKeyboardButton("➕ Add New Category Price", callback_data=f"addcat:{cc}")])
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="country_pricing")])
 
         await safe_edit(cq.message,
@@ -536,48 +535,6 @@ def _register_handlers(app: Client):
             f"Send the new price (in credits) for this category:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{cc}")]
-            ])
-        )
-
-    @app.on_callback_query(filters.regex(r"^addcat:"))
-    async def cb_addcat(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
-            return
-
-        cc = cq.data.split(":", 1)[1]
-        auth_states[cq.from_user.id] = {
-            "step": "addcat_year",
-            "country_code": cc,
-        }
-        await safe_edit(cq.message,
-            "📅 **Add Category Price — Step 1**\n\n"
-            "Send the account creation year (e.g. `2021`):",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{cc}")]
-            ])
-        )
-
-    @app.on_callback_query(filters.regex(r"^addcat_email_choice:"))
-    async def cb_addcat_email_choice(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
-            return
-
-        email = cq.data.split(":", 1)[1] == "True"
-        state = auth_states.get(cq.from_user.id)
-        if not state:
-            await cq.answer("No pending action.", show_alert=True)
-            return
-            
-        state["email_added"] = email
-        state["step"] = "addcat_price"
-        
-        await safe_edit(cq.message,
-            "💰 **Add Category Price — Step 3**\n\n"
-            "Send the price (in credits) for this category:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{state['country_code']}")]
             ])
         )
 
@@ -1750,65 +1707,7 @@ async def _handle_update_category_price(message: Message, text: str):
     )
 
 
-async def _handle_addcat_year(message: Message, text: str):
-    user_id = message.from_user.id
-    state = auth_states[user_id]
-    try:
-        year = int(text.strip())
-        if year < 2010 or year > 2030:
-            await message.reply("❌ Year must be between 2010 and 2030. Try again:")
-            return
-    except ValueError:
-        await message.reply("❌ Invalid year. Send a year (e.g. `2021`):")
-        return
-        
-    state["year"] = year
-    state["step"] = "addcat_email"
-    
-    await message.reply(
-        "📧 **Add Category Price — Step 2**\n\n"
-        "Is email added on this category?",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Yes", callback_data="addcat_email_choice:True"),
-                InlineKeyboardButton("❌ No", callback_data="addcat_email_choice:False"),
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{state['country_code']}")]
-        ])
-    )
 
-
-async def _handle_addcat_price(message: Message, text: str):
-    user_id = message.from_user.id
-    state = auth_states[user_id]
-    try:
-        price = int(text.strip())
-        if price < 1:
-            await message.reply("❌ Price must be at least 1. Try again:")
-            return
-    except ValueError:
-        await message.reply("❌ Invalid price. Send a number (e.g. `220`):")
-        return
-        
-    cc = state["country_code"]
-    year = state["year"]
-    email = state["email_added"]
-    
-    await db.set_category_price(cc, year, email, price)
-    auth_states.pop(user_id, None)
-    
-    flag = get_country_flag(cc)
-    name = get_country_name(cc)
-    email_str = "Yes" if email else "No"
-    
-    await message.reply(
-        f"✅ Category price successfully set!\n\n"
-        f"🌍 Country: {flag} **{name}** ({cc})\n"
-        f"📅 Year: **{year}**\n"
-        f"📧 Email: **{email_str}**\n"
-        f"💰 Price: **{price}** credits per OTP",
-        reply_markup=main_menu_kb(True),
-    )
 
 
 async def _handle_manual_country(message: Message, text: str):
