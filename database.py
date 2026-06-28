@@ -104,7 +104,8 @@ async def get_all_country_prices() -> dict:
 
 async def save_session(phone_number: str, session_string: str, added_by: int,
                        password: str = "", country_code: str = "XX",
-                       account_id: int = None, account_year: int = None):
+                       account_id: int = None, account_year: int = None,
+                       email_added: bool = None):
     doc = {
         "phone_number": phone_number,
         "session_string": session_string,
@@ -119,6 +120,8 @@ async def save_session(phone_number: str, session_string: str, added_by: int,
         doc["account_id"] = account_id
     if account_year is not None:
         doc["account_year"] = account_year
+    if email_added is not None:
+        doc["email_added"] = email_added
     await db.sessions.update_one(
         {"phone_number": phone_number},
         {"$set": doc},
@@ -166,10 +169,13 @@ async def set_session_password(phone_number: str, password: str):
     )
 
 
-async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None):
+async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None):
+    update_doc = {"account_id": account_id, "account_year": account_year}
+    if email_added is not None:
+        update_doc["email_added"] = email_added
     await db.sessions.update_one(
         {"phone_number": phone_number},
-        {"$set": {"account_id": account_id, "account_year": account_year}},
+        {"$set": update_doc},
     )
 
 
@@ -250,3 +256,44 @@ async def mark_tx_used(tx_hash: str, user_id: int, plan: str):
         {"$set": {"user_id": user_id, "plan": plan, "ts": datetime.now(timezone.utc)}},
         upsert=True,
     )
+
+
+# ── Category Pricing ──
+
+async def get_category_price(country_code: str, year: int | None, email_added: bool | None) -> int | None:
+    y = year if year is not None else 2025
+    e = bool(email_added)
+    doc = await db.category_pricing.find_one({
+        "country_code": country_code,
+        "year": y,
+        "email_added": e
+    })
+    if doc:
+        return doc["price"]
+    return None
+
+
+async def get_category_prices(country_code: str) -> list:
+    return await db.category_pricing.find({"country_code": country_code}).to_list(None)
+
+
+async def set_category_price(country_code: str, year: int | None, email_added: bool | None, price: int):
+    y = year if year is not None else 2025
+    e = bool(email_added)
+    await db.category_pricing.update_one(
+        {"country_code": country_code, "year": y, "email_added": e},
+        {"$set": {"price": price}},
+        upsert=True,
+    )
+
+
+async def get_session_price(session: dict) -> int:
+    cc = session.get("country_code", "XX")
+    year = session.get("account_year")
+    email_added = session.get("email_added", False)
+    
+    price = await get_category_price(cc, year, email_added)
+    if price is not None:
+        return price
+    
+    return await get_country_price(cc)

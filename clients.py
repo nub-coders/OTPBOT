@@ -203,8 +203,17 @@ async def verify_session(phone: str, session_string: str) -> tuple[bool, str]:
         await client.start()
         me = await client.get_me()
         year = estimate_account_year(me.id)
-        await db.set_session_account_info(phone, me.id, year)
-        log.info("[%s] Verified OK — %s (ID: %d, ~%s)", phone, me.first_name, me.id, year)
+        has_email = False
+        try:
+            pwd_info = await client.invoke(
+                __import__("pyrogram").raw.functions.account.GetPassword()
+            )
+            login_email = getattr(pwd_info, "login_email_pattern", None)
+            has_email = login_email is not None
+        except Exception as e:
+            log.warning("[%s] Failed to check email status: %s", phone, e)
+        await db.set_session_account_info(phone, me.id, year, has_email)
+        log.info("[%s] Verified OK — %s (ID: %d, ~%s, Email: %s)", phone, me.first_name, me.id, year, has_email)
         await client.stop()
         return True, ""
     except Exception as e:

@@ -276,18 +276,36 @@ def _register_handlers(app: Client):
         cc = state["country_code"]
         flag = get_country_flag(cc)
         name = get_country_name(cc)
+        year = state.get("account_year")
+        email_added = state.get("email_added", False)
+
+        price = await db.get_category_price(cc, year, email_added)
+        if price is None:
+            state["step"] = "set_new_category_price"
+            state["pending_cc"] = cc
+            await safe_edit(cq.message,
+                f"💰 **New Category Detected!**\n\n"
+                f"🌍 Country: {flag} **{name}** ({cc})\n"
+                f"📅 Year: **{year}**\n"
+                f"📧 Email Added: **{'Yes' if email_added else 'No'}**\n\n"
+                f"This combination has no set price. Please send the price (in credits) for this category:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")]
+                ])
+            )
+            return
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc,
-                              account_id=state.get("account_id"), account_year=state.get("account_year"))
-        await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
+                              account_id=state.get("account_id"), account_year=year,
+                              email_added=email_added)
+        await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
         auth_states.pop(cq.from_user.id, None)
 
-        price = await db.get_country_price(cc)
         await safe_edit(cq.message,
             f"✅ **Number added successfully!**\n\n"
             f"📱 `{phone}` — {flag} {name}\n"
-            f"💰 Country price: **{price}** credits per OTP",
+            f"💰 Price: **{price}** credits per OTP",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -319,18 +337,36 @@ def _register_handlers(app: Client):
         phone = state["phone"]
         flag = get_country_flag(cc)
         name = get_country_name(cc)
+        year = state.get("account_year")
+        email_added = state.get("email_added", False)
+
+        price = await db.get_category_price(cc, year, email_added)
+        if price is None:
+            state["step"] = "set_new_category_price"
+            state["pending_cc"] = cc
+            await safe_edit(cq.message,
+                f"💰 **New Category Detected!**\n\n"
+                f"🌍 Country: {flag} **{name}** ({cc})\n"
+                f"📅 Year: **{year}**\n"
+                f"📧 Email Added: **{'Yes' if email_added else 'No'}**\n\n"
+                f"This combination has no set price. Please send the price (in credits) for this category:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")]
+                ])
+            )
+            return
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc,
-                              account_id=state.get("account_id"), account_year=state.get("account_year"))
-        await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
+                              account_id=state.get("account_id"), account_year=year,
+                              email_added=email_added)
+        await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
         auth_states.pop(cq.from_user.id, None)
 
-        price = await db.get_country_price(cc)
         await safe_edit(cq.message,
             f"✅ **Number added successfully!**\n\n"
             f"📱 `{phone}` — {flag} {name}\n"
-            f"💰 Country price: **{price}** credits per OTP",
+            f"💰 Price: **{price}** credits per OTP",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -369,6 +405,8 @@ def _register_handlers(app: Client):
             await _handle_rz_custom_amount(message, text)
         elif step == "cr_custom_amount":
             await _handle_cr_custom_amount(message, text)
+        elif step == "set_new_category_price":
+            await _handle_set_new_category_price(message, text)
 
     # ── Country Pricing ──
 
@@ -560,19 +598,22 @@ def _register_handlers(app: Client):
         cc = session.get("country_code", "XX")
         flag = get_country_flag(cc)
         name = get_country_name(cc)
-        price = await db.get_country_price(cc)
+        price = await db.get_session_price(session)
         status = session.get("status", "unknown")
         pwd = session.get("password", "")
         error = session.get("last_error", "")
         acc_year = session.get("account_year")
         age_line = f"📅 **Account:** created ~{acc_year}\n" if acc_year else ""
+        email_added = session.get("email_added", False)
+        email_line = f"📧 **Email Added:** {'Yes' if email_added else 'No'}\n"
 
         info = (
             f"📱 **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"📊 Status: **{status}**\n"
-            f"💰 Country price: **{price}** credits\n"
+            f"💰 Price: **{price}** credits\n"
             f"{age_line}"
+            f"{email_line}"
             f"🔐 Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
         )
         if error:
@@ -873,7 +914,6 @@ def _register_handlers(app: Client):
             )
             return
 
-        prices = await db.get_all_country_prices()
         by_country = {}
         for s in sessions:
             cc = s.get("country_code", "XX")
@@ -884,12 +924,20 @@ def _register_handlers(app: Client):
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
-            price = prices.get(cc, 1)
             nums = by_country[cc]
+            
+            session_prices = []
+            for s in nums:
+                p = await db.get_session_price(s)
+                session_prices.append(p)
+            min_p = min(session_prices) if session_prices else 1
+            max_p = max(session_prices) if session_prices else 1
+            range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
+            
             available = sum(1 for s in nums if not clients.get_request_user(s["phone_number"]))
-            all_lines.append(f"{flag} {name} — **{price}** cr — {available} available")
+            all_lines.append(f"{flag} {name} — **{range_str}** cr — {available} available")
             all_buttons.append([InlineKeyboardButton(
-                f"{flag} {name} — {price} cr ({available})",
+                f"{flag} {name} — {range_str} cr ({available})",
                 callback_data=f"country:{cc}",
             )])
 
@@ -917,7 +965,14 @@ def _register_handlers(app: Client):
 
         flag = get_country_flag(cc)
         name = get_country_name(cc)
-        price = await db.get_country_price(cc)
+
+        session_prices = []
+        for s in sessions:
+            p = await db.get_session_price(s)
+            session_prices.append(p)
+        min_p = min(session_prices) if session_prices else 1
+        max_p = max(session_prices) if session_prices else 1
+        range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
 
         all_buttons = []
         for s in sessions:
@@ -939,7 +994,7 @@ def _register_handlers(app: Client):
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, f"pg_cn:{cc}", "get_number")
         await safe_edit(cq.message,
-            f"{flag} **{name}** — **{price}** credits per OTP\n\n"
+            f"{flag} **{name}** — **{range_str}** credits per OTP\n\n"
             f"Select a number:\n"
             f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
             f"ℹ️ **Note:** Your credit will be deducted on choosing the number\n"
@@ -966,7 +1021,7 @@ def _register_handlers(app: Client):
             return
 
         cc = session.get("country_code", "XX")
-        price = await db.get_country_price(cc)
+        price = await db.get_session_price(session)
         credits = await db.get_credits(cq.from_user.id)
         if credits < price:
             await cq.answer(
@@ -1325,13 +1380,23 @@ def _register_handlers(app: Client):
 
 # ── Auth helpers ──
 
-async def _account_info(client: Client) -> tuple[int | None, int | None]:
-    """Fetch account id + estimated creation year from a connected client."""
+async def _account_info(client: Client) -> tuple[int | None, int | None, bool]:
+    """Fetch account id + estimated creation year + has_email from a connected client."""
     try:
         me = await client.get_me()
-        return me.id, estimate_account_year(me.id)
+        year = estimate_account_year(me.id)
+        has_email = False
+        try:
+            pwd_info = await client.invoke(
+                __import__("pyrogram").raw.functions.account.GetPassword()
+            )
+            login_email = getattr(pwd_info, "login_email_pattern", None)
+            has_email = login_email is not None
+        except Exception as e:
+            log.warning("Failed to check email status: %s", e)
+        return me.id, year, has_email
     except Exception:
-        return None, None
+        return None, None, False
 
 
 async def _handle_phone(message: Message, phone: str):
@@ -1400,7 +1465,7 @@ async def _handle_code(message: Message, code: str):
             phone_code_hash=state["phone_code_hash"],
             phone_code=clean_code,
         )
-        acc_id, acc_year = await _account_info(client)
+        acc_id, acc_year, has_email = await _account_info(client)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -1413,6 +1478,7 @@ async def _handle_code(message: Message, code: str):
             "country_code": cc,
             "account_id": acc_id,
             "account_year": acc_year,
+            "email_added": has_email,
         }
         await safe_edit(status_msg,
             f"✅ Code verified for `{phone}`\n\n"
@@ -1465,7 +1531,7 @@ async def _handle_password(message: Message, password: str):
 
     try:
         await client.check_password(password)
-        acc_id, acc_year = await _account_info(client)
+        acc_id, acc_year, has_email = await _account_info(client)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -1478,6 +1544,7 @@ async def _handle_password(message: Message, password: str):
             "country_code": cc,
             "account_id": acc_id,
             "account_year": acc_year,
+            "email_added": has_email,
         }
         await safe_edit(status_msg,
             f"✅ Password accepted for `{phone}`\n\n"
@@ -1826,4 +1893,41 @@ async def _handle_cr_custom_amount(message: Message, text: str):
     await message.reply(
         f"🌐 **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
         reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _handle_set_new_category_price(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states[user_id]
+    try:
+        price = int(text.strip())
+        if price <= 0:
+            await message.reply("❌ Price must be a positive integer. Please try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid price. Please enter a positive integer:")
+        return
+
+    cc = state["pending_cc"]
+    year = state.get("account_year")
+    email_added = state.get("email_added", False)
+
+    await db.set_category_price(cc, year, email_added, price)
+
+    phone = state["phone"]
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
+
+    await db.save_session(phone, state["session_string"], user_id,
+                          password=state.get("password", ""), country_code=cc,
+                          account_id=state.get("account_id"), account_year=year,
+                          email_added=email_added)
+    await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
+    auth_states.pop(user_id, None)
+
+    await message.reply(
+        f"✅ **Category price set and number added successfully!**\n\n"
+        f"📱 `{phone}` — {flag} {name}\n"
+        f"💰 Price: **{price}** credits per OTP",
+        reply_markup=main_menu_kb(True),
     )
