@@ -10,6 +10,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 MONGODB_URI = os.getenv("MONGODB_URI", "")
 OTP_TIMEOUT = int(os.getenv("OTP_TIMEOUT", "300"))
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+CHAT_ID = int(os.getenv("CHAT_ID", "0")) or None
 
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
@@ -24,6 +25,14 @@ CREDIT_PLANS = {
     "50": {"credits": 50, "amount_inr": 5000, "label": "50 Credits — ₹50"},
     "100": {"credits": 100, "amount_inr": 10000, "label": "100 Credits — ₹100"},
 }
+
+SUPPORT_HANDLES = [
+    "@VAULT_Store_admi",
+    "@Panel_hightech_seller",
+    "@Midnight_rider_UK00",
+    "@Trusted_account1seller",
+    "@just_a_dev",
+]
 
 CRYPTO_PLANS = {
     k: {
