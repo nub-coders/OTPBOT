@@ -76,6 +76,14 @@ async def deduct_credit(telegram_id: int) -> bool:
     return result.modified_count > 0
 
 
+async def deduct_credits(telegram_id: int, amount: int) -> bool:
+    result = await db.users.update_one(
+        {"telegram_id": telegram_id, "credits": {"$gte": amount}},
+        {"$inc": {"credits": -amount}},
+    )
+    return result.modified_count > 0
+
+
 # ── Country Pricing ──
 
 async def set_country_price(country_code: str, price: int):
