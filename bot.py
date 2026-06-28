@@ -16,7 +16,7 @@ from pyrogram.errors import (
     FloodWait,
     MessageNotModified,
 )
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL
 import database as db
 import clients
 import payments
@@ -75,9 +75,10 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 Buy Credits", callback_data="buy_credits")],
         [
             InlineKeyboardButton("📞 Support", callback_data="support"),
-            InlineKeyboardButton("📢 Updates", url="https://t.me/+ntOL-unWf3swYmE1"),
         ],
     ]
+    if UPDATES_CHANNEL:
+        buttons[-1].append(InlineKeyboardButton("📢 Updates", url=UPDATES_CHANNEL))
     if is_admin:
         buttons.append(
             [InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")]
@@ -107,6 +108,34 @@ def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Back", callback_data=target)],
     ])
+
+
+PAGE_SIZE = 25
+
+
+def paginate_buttons(items, page, cb_prefix, back_target):
+    """Slice items for the current page and add nav buttons.
+    items: list of InlineKeyboardButton rows (each a list).
+    Returns (page_items, nav_keyboard_rows) for the current page."""
+    total = len(items)
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_items = items[start:end]
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{cb_prefix}:{page - 1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"{cb_prefix}:{page + 1}"))
+
+    footer = []
+    if nav:
+        footer.append(nav)
+    footer.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
+
+    page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+    return page_items, footer, page_label
 
 
 # ── Handlers ──
@@ -303,11 +332,13 @@ def _register_handlers(app: Client):
 
     # ── Country Pricing ──
 
-    @app.on_callback_query(filters.regex("^country_pricing$"))
+    @app.on_callback_query(filters.regex(r"^country_pricing$|^pg_cp:\d+$"))
     async def cb_country_pricing(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer("⛔ Admin only.", show_alert=True)
             return
+
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_cp:") else 0
 
         sessions = await db.get_all_sessions()
         prices = await db.get_all_country_prices()
@@ -328,23 +359,25 @@ def _register_handlers(app: Client):
             )
             return
 
-        lines = ["💰 **Country Pricing**\n"]
-        buttons = []
+        all_lines = []
+        all_buttons = []
         for cc in sorted(countries.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
             price = prices.get(cc, 1)
             info = countries[cc]
-            lines.append(f"{flag} **{name}** ({cc}) — **{price}** cr — {info['active']}/{info['total']} numbers")
-            buttons.append([InlineKeyboardButton(
+            all_lines.append(f"{flag} **{name}** ({cc}) — **{price}** cr — {info['active']}/{info['total']} numbers")
+            all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {price} cr",
                 callback_data=f"setcprice:{cc}",
             )])
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_cp", "admin_panel")
+        start = page * PAGE_SIZE
+        page_lines = all_lines[start:start + PAGE_SIZE]
         await safe_edit(cq.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(buttons),
+            "💰 **Country Pricing**\n\n" + "\n".join(page_lines) + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
     @app.on_callback_query(filters.regex(r"^setcprice:"))
@@ -370,11 +403,13 @@ def _register_handlers(app: Client):
 
     # ── List Numbers (Admin) ──
 
-    @app.on_callback_query(filters.regex("^list_numbers$"))
+    @app.on_callback_query(filters.regex(r"^list_numbers$|^pg_ln:\d+$"))
     async def cb_list_numbers(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer("⛔ Admin only.", show_alert=True)
             return
+
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ln:") else 0
 
         sessions = await db.get_all_sessions()
         if not sessions:
@@ -390,13 +425,12 @@ def _register_handlers(app: Client):
             cc = s.get("country_code", "XX")
             by_country.setdefault(cc, []).append(s)
 
-        lines = ["📋 **Registered Numbers:**\n"]
-        buttons = []
+        all_entries = []
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
             price = prices.get(cc, 1)
-            lines.append(f"\n{flag} **{name}** — {price} cr/OTP")
+            header = f"\n{flag} **{name}** — {price} cr/OTP"
             for s in by_country[cc]:
                 phone = s["phone_number"]
                 status_icon = {"active": "🟢", "sold": "🔴", "error": "⚠️"}.get(s.get("status"), "⚪")
@@ -405,15 +439,39 @@ def _register_handlers(app: Client):
                 error_text = f"\n  └ ❗ {s['last_error'][:80]}" if s.get("last_error") else ""
                 acc_year = s.get("account_year")
                 age_text = f" — 📅 ~{acc_year}" if acc_year else ""
-                lines.append(f"  {status_icon} `{phone}`{age_text}{assigned_text}{error_text}")
-                buttons.append([
-                    InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}"),
-                ])
+                line = f"  {status_icon} `{phone}`{age_text}{assigned_text}{error_text}"
+                btn = [InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}")]
+                all_entries.append({"header": header, "line": line, "btn": btn})
+                header = None
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_entries = all_entries[start:end]
+
+        lines = ["📋 **Registered Numbers:**\n"]
+        page_btns = []
+        seen_headers = set()
+        for e in page_entries:
+            if e["header"] and e["header"] not in seen_headers:
+                lines.append(e["header"])
+                seen_headers.add(e["header"])
+            lines.append(e["line"])
+            page_btns.append(e["btn"])
+
+        total_pages = (len(all_entries) + PAGE_SIZE - 1) // PAGE_SIZE
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_ln:{page - 1}"))
+        if end < len(all_entries):
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_ln:{page + 1}"))
+        if nav:
+            page_btns.append(nav)
+        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+        page_btns.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+
         await safe_edit(cq.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(buttons),
+            "\n".join(lines) + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns),
         )
 
     @app.on_callback_query(filters.regex(r"^rm:"))
@@ -607,11 +665,13 @@ def _register_handlers(app: Client):
 
     # ── Users ──
 
-    @app.on_callback_query(filters.regex("^users_list$"))
+    @app.on_callback_query(filters.regex(r"^users_list$|^pg_ul:\d+$"))
     async def cb_users_list(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer("⛔ Admin only.", show_alert=True)
             return
+
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ul:") else 0
 
         users = await db.get_all_users()
         if not users:
@@ -620,24 +680,41 @@ def _register_handlers(app: Client):
             )
             return
 
-        lines = ["👥 **Users:**\n"]
-        buttons = []
+        all_lines = []
+        all_buttons = []
         for u in users:
             role_icon = "👑" if u["role"] == "admin" else "👤"
             name = u.get("first_name") or u.get("username") or str(u["telegram_id"])
             credits = u.get("credits", 0)
-            lines.append(f"{role_icon} {name} — `{u['telegram_id']}` — 💰 {credits}")
+            all_lines.append(f"{role_icon} {name} — `{u['telegram_id']}` — 💰 {credits}")
             if u["role"] != "admin":
-                buttons.append([
+                all_buttons.append([
                     InlineKeyboardButton(
                         f"💰 Add credits: {name}",
                         callback_data=f"cr:{u['telegram_id']}",
                     )
                 ])
+            else:
+                all_buttons.append(None)
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        page_lines = all_lines[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        page_raw = all_buttons[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        page_btns = [b for b in page_raw if b is not None]
+
+        total_pages = (len(all_lines) + PAGE_SIZE - 1) // PAGE_SIZE
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_ul:{page - 1}"))
+        if (page + 1) * PAGE_SIZE < len(all_lines):
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_ul:{page + 1}"))
+        if nav:
+            page_btns.append(nav)
+        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+        page_btns.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+
         await safe_edit(cq.message,
-            "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons)
+            "👥 **Users:**\n\n" + "\n".join(page_lines) + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns),
         )
 
     # ── Credits ──
@@ -743,8 +820,10 @@ def _register_handlers(app: Client):
 
     # ── Get Number (User) — Country-based ──
 
-    @app.on_callback_query(filters.regex("^get_number$"))
+    @app.on_callback_query(filters.regex(r"^get_number$|^pg_gn:\d+$"))
     async def cb_get_number(_, cq: CallbackQuery):
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_gn:") else 0
+
         sessions = await db.get_active_sessions()
         if not sessions:
             await safe_edit(cq.message,
@@ -760,29 +839,37 @@ def _register_handlers(app: Client):
             cc = s.get("country_code", "XX")
             by_country.setdefault(cc, []).append(s)
 
-        lines = ["🌍 **Select a Country**\n"]
-        buttons = []
+        all_buttons = []
+        all_lines = []
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
             price = prices.get(cc, 1)
             nums = by_country[cc]
             available = sum(1 for s in nums if not clients.get_request_user(s["phone_number"]))
-            lines.append(f"{flag} {name} — **{price}** cr — {available} available")
-            buttons.append([InlineKeyboardButton(
+            all_lines.append(f"{flag} {name} — **{price}** cr — {available} available")
+            all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {price} cr ({available})",
                 callback_data=f"country:{cc}",
             )])
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_gn", "main_menu")
+        start = page * PAGE_SIZE
+        page_lines = all_lines[start:start + PAGE_SIZE]
         await safe_edit(cq.message,
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(buttons),
+            "🌍 **Select a Country**\n\n" + "\n".join(page_lines) + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
-    @app.on_callback_query(filters.regex(r"^country:"))
+    @app.on_callback_query(filters.regex(r"^country:[A-Z]+$|^pg_cn:[A-Z]+:\d+$"))
     async def cb_country(_, cq: CallbackQuery):
-        cc = cq.data.split(":", 1)[1]
+        if cq.data.startswith("pg_cn:"):
+            parts = cq.data.split(":")
+            cc, page = parts[1], int(parts[2])
+        else:
+            cc = cq.data.split(":", 1)[1]
+            page = 0
+
         sessions = await db.get_active_sessions_by_country(cc)
         if not sessions:
             await cq.answer("No numbers available for this country.", show_alert=True)
@@ -792,28 +879,28 @@ def _register_handlers(app: Client):
         name = get_country_name(cc)
         price = await db.get_country_price(cc)
 
-        buttons = []
+        all_buttons = []
         for s in sessions:
             phone = s["phone_number"]
             masked = mask_phone(phone)
             assigned = clients.get_request_user(phone)
             if assigned:
-                buttons.append([
+                all_buttons.append([
                     InlineKeyboardButton(f"🔴 {masked} (in use)", callback_data="noop")
                 ])
             else:
-                buttons.append([
+                all_buttons.append([
                     InlineKeyboardButton(
                         f"🟢 {masked}", callback_data=f"sel:{phone}"
                     )
                 ])
 
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="get_number")])
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, f"pg_cn:{cc}", "get_number")
         await safe_edit(cq.message,
             f"{flag} **{name}** — **{price}** credits per OTP\n\n"
             f"Select a number:\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}",
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
     @app.on_callback_query(filters.regex("^noop$"))
@@ -926,9 +1013,11 @@ def _register_handlers(app: Client):
 
     # ── OTP History ──
 
-    @app.on_callback_query(filters.regex("^my_history$"))
+    @app.on_callback_query(filters.regex(r"^my_history$|^pg_mh:\d+$"))
     async def cb_history(_, cq: CallbackQuery):
-        otps = await db.get_user_otps(cq.from_user.id, limit=10)
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_mh:") else 0
+
+        otps = await db.get_user_otps(cq.from_user.id, limit=200)
         if not otps:
             await safe_edit(cq.message,
                 "📜 **No OTP history yet.**",
@@ -936,15 +1025,33 @@ def _register_handlers(app: Client):
             )
             return
 
-        lines = ["📜 **Recent OTPs:**\n"]
+        all_lines = []
         for o in otps:
             ts = o["created_at"].strftime("%m/%d %H:%M")
-            lines.append(
+            all_lines.append(
                 f"`{o['code']}` — {o['phone_number']} — {o['sender']} — {ts}"
             )
 
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_lines = all_lines[start:end]
+        total_pages = (len(all_lines) + PAGE_SIZE - 1) // PAGE_SIZE
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_mh:{page - 1}"))
+        if end < len(all_lines):
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_mh:{page + 1}"))
+
+        footer = []
+        if nav:
+            footer.append(nav)
+        footer.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
+        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+
         await safe_edit(cq.message,
-            "\n".join(lines), reply_markup=back_kb("main_menu")
+            "📜 **Recent OTPs:**\n\n" + "\n".join(page_lines) + page_label,
+            reply_markup=InlineKeyboardMarkup(footer),
         )
 
     # ── Buy Credits ──

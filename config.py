@@ -11,6 +11,15 @@ MONGODB_URI = os.getenv("MONGODB_URI", "")
 OTP_TIMEOUT = int(os.getenv("OTP_TIMEOUT", "300"))
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 CHAT_ID = int(os.getenv("CHAT_ID", "0")) or None
+_updates_raw = os.getenv("UPDATES_CHANNEL", "").strip()
+if _updates_raw.startswith(("https://", "http://")):
+    UPDATES_CHANNEL = _updates_raw
+elif _updates_raw.startswith("@"):
+    UPDATES_CHANNEL = f"https://t.me/{_updates_raw[1:]}"
+elif _updates_raw:
+    UPDATES_CHANNEL = f"https://t.me/{_updates_raw}"
+else:
+    UPDATES_CHANNEL = ""
 
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
