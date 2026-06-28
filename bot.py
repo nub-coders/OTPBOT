@@ -891,15 +891,15 @@ def _register_handlers(app: Client):
         pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
         age_line = f"\n📅 Account created: ~{acc_year}" if acc_year else ""
-        masked = mask_phone(phone)
         support = " | ".join(SUPPORT_HANDLES)
         await safe_edit(cq.message,
             f"✅ **Number assigned!**\n\n"
             f"{flag} {name}\n"
-            f"📱 `{masked}`\n"
+            f"📱 `{phone}`\n"
             f"💰 Price: **{price}** credits (deducted)\n"
             f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{credit_line}{pwd_line}\n\n"
             "Any OTP received on this number will be forwarded to you.\n\n"
+            "⚠️ On manual release, your credits will be locked for 2 hours.\n\n"
             f"⚠️ Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Release Number", callback_data=f"release:{phone}")],
