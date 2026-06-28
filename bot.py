@@ -16,7 +16,8 @@ from pyrogram.errors import (
     FloodWait,
     MessageNotModified,
 )
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL
+from decimal import Decimal
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR
 import database as db
 import clients
 import payments
@@ -27,6 +28,39 @@ log = logging.getLogger(__name__)
 bot: Client = None
 auth_states: dict[int, dict] = {}
 pay_states: dict[int, dict] = {}
+
+
+def get_credit_plan(plan_key: str) -> dict | None:
+    if plan_key.startswith("custom_"):
+        try:
+            credits = int(plan_key.split("_")[1])
+            if credits < 10:
+                return None
+            return {
+                "credits": credits,
+                "amount_inr": credits * 100,  # in paisa
+                "label": f"{credits} Credits — ₹{credits}",
+            }
+        except Exception:
+            return None
+    return CREDIT_PLANS.get(plan_key)
+
+
+def get_crypto_plan(plan_key: str) -> dict | None:
+    if plan_key.startswith("custom_"):
+        try:
+            credits = int(plan_key.split("_")[1])
+            if credits < 10:
+                return None
+            amount_inr = credits * 100
+            amount_usdt = (Decimal(str(amount_inr)) / Decimal("100") / Decimal(str(USDT_TO_INR))).quantize(Decimal("0.01"))
+            return {
+                "credits": credits,
+                "amount_usdt": amount_usdt,
+            }
+        except Exception:
+            return None
+    return CRYPTO_PLANS.get(plan_key)
 
 
 async def safe_edit(message, text, **kwargs):
@@ -329,6 +363,10 @@ def _register_handlers(app: Client):
             await _handle_update_password_old(message, text)
         elif step == "update_password_new":
             await _handle_update_password_new(message, text)
+        elif step == "rz_custom_amount":
+            await _handle_rz_custom_amount(message, text)
+        elif step == "cr_custom_amount":
+            await _handle_cr_custom_amount(message, text)
 
     # ── Country Pricing ──
 
@@ -899,7 +937,9 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{flag} **{name}** — **{price}** credits per OTP\n\n"
             f"Select a number:\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}",
+            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
+            f"ℹ️ **Note:** Your credit will be deducted on choosing the number\n"
+            f"and will be refunded after 2 hours when manual release.",
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
@@ -1058,6 +1098,7 @@ def _register_handlers(app: Client):
 
     @app.on_callback_query(filters.regex("^buy_credits$"))
     async def cb_buy_credits(_, cq: CallbackQuery):
+        auth_states.pop(cq.from_user.id, None)
         credits = await db.get_credits(cq.from_user.id)
         buttons = [
             [
@@ -1082,6 +1123,7 @@ def _register_handlers(app: Client):
             buttons.append([InlineKeyboardButton(
                 plan["label"], callback_data=f"rz_pay:{key}",
             )])
+        buttons.append([InlineKeyboardButton("✏️ Custom Amount", callback_data="rz_custom")])
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="buy_credits")])
         await safe_edit(cq.message,
             "💸 **Razorpay — Choose a plan:**",
@@ -1091,7 +1133,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^rz_pay:"))
     async def cb_rz_pay(_, cq: CallbackQuery):
         plan_key = cq.data.split(":", 1)[1]
-        plan = CREDIT_PLANS.get(plan_key)
+        plan = get_credit_plan(plan_key)
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
@@ -1134,7 +1176,7 @@ def _register_handlers(app: Client):
     async def cb_rz_check(_, cq: CallbackQuery):
         parts = cq.data.split(":")
         qr_id, plan_key = parts[1], parts[2]
-        plan = CREDIT_PLANS.get(plan_key)
+        plan = get_credit_plan(plan_key)
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
@@ -1158,6 +1200,7 @@ def _register_handlers(app: Client):
                 f"{plan['credits']} Credits — {plan['amount_usdt']} USDT",
                 callback_data=f"cr_net:{key}",
             )])
+        buttons.append([InlineKeyboardButton("✏️ Custom Amount", callback_data="cr_custom")])
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="buy_credits")])
         await safe_edit(cq.message,
             "🪙 **Crypto — Choose a plan:**",
@@ -1182,7 +1225,7 @@ def _register_handlers(app: Client):
     async def cb_cr_addr(_, cq: CallbackQuery):
         parts = cq.data.split(":")
         network, plan_key = parts[1], parts[2]
-        plan = CRYPTO_PLANS.get(plan_key)
+        plan = get_crypto_plan(plan_key)
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
@@ -1226,6 +1269,26 @@ def _register_handlers(app: Client):
     async def cb_cancel_pay(_, cq: CallbackQuery):
         pay_states.pop(cq.from_user.id, None)
         await safe_edit(cq.message, "❌ Payment cancelled.", reply_markup=back_kb("main_menu"))
+
+    @app.on_callback_query(filters.regex("^rz_custom$"))
+    async def cb_rz_custom(_, cq: CallbackQuery):
+        auth_states[cq.from_user.id] = {"step": "rz_custom_amount"}
+        await safe_edit(cq.message,
+            "💬 **Enter the number of credits you want to purchase (minimum 10):**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")]
+            ])
+        )
+
+    @app.on_callback_query(filters.regex("^cr_custom$"))
+    async def cb_cr_custom(_, cq: CallbackQuery):
+        auth_states[cq.from_user.id] = {"step": "cr_custom_amount"}
+        await safe_edit(cq.message,
+            "💬 **Enter the number of credits you want to purchase (minimum 10):**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")]
+            ])
+        )
 
     # ── Help / Cancel ──
 
@@ -1593,7 +1656,7 @@ async def _handle_update_password_new(message: Message, text: str):
 
 async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
     import time as _time
-    plan = CREDIT_PLANS.get(plan_key)
+    plan = get_credit_plan(plan_key)
     if not plan:
         return
     start = _time.time()
@@ -1653,7 +1716,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     status_msg = await message.reply("⏳ Verifying deposit on Binance...")
 
     plan_key = pstate["plan_key"]
-    plan = CRYPTO_PLANS.get(plan_key)
+    plan = get_crypto_plan(plan_key)
     if not plan:
         pay_states.pop(user_id, None)
         await safe_edit(status_msg, "❌ Invalid plan.", reply_markup=back_kb("main_menu"))
@@ -1678,4 +1741,85 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
         f"🎁 +{plan['credits']} credits added\n"
         f"💰 New balance: **{new_balance}**",
         reply_markup=back_kb("main_menu"),
+    )
+
+
+async def _handle_rz_custom_amount(message: Message, text: str):
+    user_id = message.from_user.id
+    try:
+        credits = int(text.strip())
+        if credits < 10:
+            await message.reply("❌ Minimum amount is 10 credits. Please try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid number. Please enter a valid integer (minimum 10):")
+        return
+
+    auth_states.pop(user_id, None)
+
+    plan_key = f"custom_{credits}"
+    plan = get_credit_plan(plan_key)
+
+    status_msg = await message.reply("⏳ Generating QR code...")
+    qr = await asyncio.to_thread(
+        payments.create_razorpay_qr, plan["label"], plan["amount_inr"], user_id,
+    )
+    if not qr:
+        await safe_edit(status_msg,
+            "❌ Payment gateway error. Try later.",
+            reply_markup=back_kb("buy_credits"),
+        )
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")],
+    ])
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    qr_msg = await bot.send_photo(
+        user_id,
+        photo=qr["image_url"],
+        caption=(
+            f"📱 **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
+            f"🎁 You'll receive **{plan['credits']} credits**\n\n"
+            "⏱ Valid for 15 minutes."
+        ),
+        reply_markup=buttons,
+    )
+
+    asyncio.create_task(_razorpay_poller(
+        user_id, qr["id"], plan_key, qr_msg,
+    ))
+
+
+async def _handle_cr_custom_amount(message: Message, text: str):
+    user_id = message.from_user.id
+    try:
+        credits = int(text.strip())
+        if credits < 10:
+            await message.reply("❌ Minimum amount is 10 credits. Please try again:")
+            return
+    except ValueError:
+        await message.reply("❌ Invalid number. Please enter a valid integer (minimum 10):")
+        return
+
+    auth_states.pop(user_id, None)
+
+    plan_key = f"custom_{credits}"
+    plan = get_crypto_plan(plan_key)
+
+    buttons = [
+        [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}")],
+        [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}")],
+        [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}")],
+        [InlineKeyboardButton("🔙 Back", callback_data="cr_plans")],
+    ]
+    await message.reply(
+        f"🌐 **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
