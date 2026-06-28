@@ -161,6 +161,13 @@ async def set_session_password(phone_number: str, password: str):
     )
 
 
+async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None):
+    await db.sessions.update_one(
+        {"phone_number": phone_number},
+        {"$set": {"account_id": account_id, "account_year": account_year}},
+    )
+
+
 async def set_session_status(phone_number: str, status: str, error: str = ""):
     if error:
         await db.sessions.update_one(

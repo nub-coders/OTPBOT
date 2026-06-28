@@ -177,6 +177,52 @@ def get_country_name(country_code: str) -> str:
     return "Unknown"
 
 
+# ── Account age estimation ──
+# Telegram has no API for creation date, but user IDs are assigned roughly
+# sequentially over time. We interpolate against known ID->date checkpoints.
+# Accuracy is approximate (within a few months).
+
+_ID_CHECKPOINTS = [
+    (1_000_000, 2013.6),
+    (5_000_000, 2014.2),
+    (10_000_000, 2014.6),
+    (50_000_000, 2015.5),
+    (100_000_000, 2016.0),
+    (200_000_000, 2017.0),
+    (300_000_000, 2018.0),
+    (500_000_000, 2019.0),
+    (1_000_000_000, 2019.6),
+    (2_000_000_000, 2021.0),
+    (4_000_000_000, 2022.3),
+    (5_000_000_000, 2022.8),
+    (6_000_000_000, 2023.5),
+    (7_000_000_000, 2024.0),
+    (7_500_000_000, 2024.6),
+    (8_000_000_000, 2025.2),
+]
+
+
+def estimate_account_year(user_id: int) -> int | None:
+    """Estimate the year a Telegram account was created from its user ID.
+    Returns the approximate year, or None if it can't be estimated."""
+    if not user_id or user_id <= 0:
+        return None
+
+    pts = _ID_CHECKPOINTS
+    if user_id <= pts[0][0]:
+        return int(pts[0][1])
+    if user_id >= pts[-1][0]:
+        return int(pts[-1][1])
+
+    for i in range(len(pts) - 1):
+        id_lo, yr_lo = pts[i]
+        id_hi, yr_hi = pts[i + 1]
+        if id_lo <= user_id <= id_hi:
+            frac = (user_id - id_lo) / (id_hi - id_lo)
+            return int(yr_lo + frac * (yr_hi - yr_lo))
+    return None
+
+
 def search_country(query: str) -> list[tuple[str, str, str]]:
     """Fuzzy search countries by name or flag. Returns list of (code, name, flag)."""
     query = query.strip()
