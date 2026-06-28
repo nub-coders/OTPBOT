@@ -16,11 +16,11 @@ from pyrogram.errors import (
     FloodWait,
     MessageNotModified,
 )
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS
 import database as db
 import clients
 import payments
-from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year
+from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,21 @@ async def safe_edit(message, text, **kwargs):
         return await message.edit_text(text, **kwargs)
     except MessageNotModified:
         pass
+
+
+async def alert(bot: Client, text: str):
+    """Send an alert to CHAT_ID channel, or to all admins if not configured."""
+    if CHAT_ID:
+        try:
+            await bot.send_message(CHAT_ID, text)
+        except Exception as e:
+            log.error("Failed to send alert to CHAT_ID %s: %s", CHAT_ID, e)
+    else:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception as e:
+                log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
 
 def create_bot() -> Client:
@@ -58,6 +73,10 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📜 My History", callback_data="my_history"),
         ],
         [InlineKeyboardButton("💳 Buy Credits", callback_data="buy_credits")],
+        [
+            InlineKeyboardButton("📞 Support", callback_data="support"),
+            InlineKeyboardButton("📢 Updates", url="https://t.me/+ntOL-unWf3swYmE1"),
+        ],
     ]
     if is_admin:
         buttons.append(
@@ -133,6 +152,17 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"👋 **OTP Bot — Main Menu**\n\nChoose an option:{credit_line}",
             reply_markup=main_menu_kb(is_adm),
+        )
+
+    @app.on_callback_query(filters.regex("^support$"))
+    async def cb_support(_, cq: CallbackQuery):
+        lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@')})" for h in SUPPORT_HANDLES)
+        await safe_edit(cq.message,
+            f"📞 **Support**\n\n"
+            f"Having issues? Contact any of our support agents:\n\n"
+            f"{lines}\n\n"
+            "We're here to help with purchases, login issues, or any questions.",
+            reply_markup=back_kb(),
         )
 
     @app.on_callback_query(filters.regex("^admin_panel$"))
@@ -765,15 +795,16 @@ def _register_handlers(app: Client):
         buttons = []
         for s in sessions:
             phone = s["phone_number"]
+            masked = mask_phone(phone)
             assigned = clients.get_request_user(phone)
             if assigned:
                 buttons.append([
-                    InlineKeyboardButton(f"🔴 {phone} (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"🔴 {masked} (in use)", callback_data="noop")
                 ])
             else:
                 buttons.append([
                     InlineKeyboardButton(
-                        f"🟢 {phone}", callback_data=f"sel:{phone}"
+                        f"🟢 {masked}", callback_data=f"sel:{phone}"
                     )
                 ])
 
@@ -820,10 +851,35 @@ def _register_handlers(app: Client):
         except Exception as e:
             log.error("Failed to start session %s: %s", phone, e)
             await safe_edit(cq.message,
-                f"❌ Failed to connect `{phone}`: `{e}`",
+                f"❌ Failed to connect `{mask_phone(phone)}`: `{e}`",
                 reply_markup=back_kb("main_menu"),
             )
             return
+
+        pwd = session.get("password", "")
+        if pwd:
+            await safe_edit(cq.message, "⏳ Verifying password...")
+            ok, err = await clients.check_password(phone, pwd)
+            if not ok:
+                await clients.stop_session(phone)
+                await db.set_session_status(phone, "password_failed", err)
+                masked = mask_phone(phone)
+                await alert(app,
+                    f"🚨 **Password Check Failed**\n\n"
+                    f"📱 Number: `{phone}`\n"
+                    f"❌ Error: `{err[:200]}`\n"
+                    f"🔐 Stored password may be wrong or changed."
+                )
+                await safe_edit(cq.message,
+                    f"❌ Password verification failed for `{masked}`.\n\n"
+                    "This has been reported to the admins.",
+                    reply_markup=back_kb("main_menu"),
+                )
+                return
+
+        for _ in range(price):
+            await db.deduct_credit(cq.from_user.id)
+        log.info("Deducted %d credits from user %d on selection", price, cq.from_user.id)
 
         clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT)
 
@@ -835,13 +891,16 @@ def _register_handlers(app: Client):
         pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
         age_line = f"\n📅 Account created: ~{acc_year}" if acc_year else ""
+        masked = mask_phone(phone)
+        support = " | ".join(SUPPORT_HANDLES)
         await safe_edit(cq.message,
             f"✅ **Number assigned!**\n\n"
             f"{flag} {name}\n"
-            f"📱 `{phone}`\n"
-            f"💰 Price: **{price}** credits per OTP\n"
+            f"📱 `{masked}`\n"
+            f"💰 Price: **{price}** credits (deducted)\n"
             f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{credit_line}{pwd_line}\n\n"
-            "Any OTP received on this number will be forwarded to you.",
+            "Any OTP received on this number will be forwarded to you.\n\n"
+            f"⚠️ Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Release Number", callback_data=f"release:{phone}")],
                 [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
@@ -858,8 +917,11 @@ def _register_handlers(app: Client):
 
         clients.release_number(phone)
         await clients.stop_session(phone)
+        await cq.answer("Your credits will be refunded in 2 hours.", show_alert=True)
         await safe_edit(cq.message,
-            f"🔓 `{phone}` released.", reply_markup=back_kb("main_menu")
+            f"🔓 `{mask_phone(phone)}` released.\n\n"
+            "💰 Credits will be refunded within 2 hours.",
+            reply_markup=back_kb("main_menu"),
         )
 
     # ── OTP History ──
