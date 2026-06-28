@@ -278,7 +278,8 @@ def _register_handlers(app: Client):
         name = get_country_name(cc)
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
-                              password=state.get("password", ""), country_code=cc)
+                              password=state.get("password", ""), country_code=cc,
+                              account_id=state.get("account_id"), account_year=state.get("account_year"))
         await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
         auth_states.pop(cq.from_user.id, None)
 
@@ -320,7 +321,8 @@ def _register_handlers(app: Client):
         name = get_country_name(cc)
 
         await db.save_session(phone, state["session_string"], cq.from_user.id,
-                              password=state.get("password", ""), country_code=cc)
+                              password=state.get("password", ""), country_code=cc,
+                              account_id=state.get("account_id"), account_year=state.get("account_year"))
         await db.set_session_account_info(phone, state.get("account_id"), state.get("account_year"))
         auth_states.pop(cq.from_user.id, None)
 
@@ -921,15 +923,17 @@ def _register_handlers(app: Client):
         for s in sessions:
             phone = s["phone_number"]
             masked = mask_phone(phone)
+            year = s.get("account_year")
+            year_str = f" ({year})" if year else ""
             assigned = clients.get_request_user(phone)
             if assigned:
                 all_buttons.append([
-                    InlineKeyboardButton(f"🔴 {masked} (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"🔴 {masked}{year_str} (in use)", callback_data="noop")
                 ])
             else:
                 all_buttons.append([
                     InlineKeyboardButton(
-                        f"🟢 {masked}", callback_data=f"sel:{phone}"
+                        f"🟢 {masked}{year_str}", callback_data=f"sel:{phone}"
                     )
                 ])
 
