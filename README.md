@@ -29,7 +29,9 @@ A Telegram bot that manages phone number sessions and forwards OTP codes to user
 - View stats (users, numbers, OTPs, payment breakdown)
 
 ### Technical
-- **On-demand sessions** -- numbers only connect when a user selects them, no persistent connections
+- **On-demand sessions** — numbers only connect when a user selects them, no persistent connections
+- **Custom Emoji Engine** — automatically intercepts and renders Telegram custom emojis (animated/static) in message text via monkey-patched Pyrogram client methods
+- **Dual Parse Mode** — supports mixed HTML and Markdown message parsing in Pyrogram, allowing custom emoji HTML tags to coexist with standard Markdown formatting
 - **MongoDB** storage for sessions, users, OTP history, and payments
 - **Razorpay** QR codes tagged with project identifier for multi-project key sharing
 - **Binance** USDT deposit verification with TX hash validation
@@ -38,15 +40,19 @@ A Telegram bot that manages phone number sessions and forwards OTP codes to user
 ## Project Structure
 
 ```
-bot.py          Telegram bot handlers and UI
-clients.py      Userbot session management and OTP forwarding
-database.py     MongoDB operations (Motor async driver)
-payments.py     Razorpay and Binance payment integration
-config.py       Environment config and credit plans
-utils.py        OTP extraction from message text
-main.py         Entry point
-Dockerfile      Python 3.13-slim container
-docker-compose.yml  Bot + MongoDB services
+bot.py                  Telegram bot handlers and UI
+clients.py              Userbot session management and OTP forwarding
+database.py             MongoDB operations (Motor async driver)
+payments.py             Razorpay and Binance payment integration
+config.py               Environment config and credit plans
+custom_emojis.py        Custom emoji registry and Pyrogram monkey-patching
+utils.py                OTP extraction and country code helpers (including Eswatini)
+main.py                 Entry point
+extract_emoji_pack.py   Helper script to extract custom emoji sticker packs
+send_emoji_preview.py   Helper script to send emoji previews to a target user
+data/                   Directory containing custom emoji data
+Dockerfile              Python 3.13-slim container
+docker-compose.yml      Bot + MongoDB services
 ```
 
 ## Setup
@@ -61,7 +67,13 @@ docker-compose.yml  Bot + MongoDB services
 
 ### Configuration
 
-Create a `.env` file:
+Copy the provided `.env.example` template to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in the required configuration variables:
 
 ```env
 BOT_TOKEN=your_bot_token
@@ -93,6 +105,27 @@ docker compose up -d --build
 pip install -r requirements.txt
 python main.py
 ```
+
+## Custom Emojis
+
+The bot can automatically render Telegram custom emojis in message text (e.g. replacing standard unicode emojis like `✅`, `❌`, `⏳`, etc. with premium custom equivalents).
+
+To register and use a custom emoji pack:
+
+1. Extract a custom emoji pack using the helper script (provide either the pack's short name or its Telegram link):
+   ```bash
+   python extract_emoji_pack.py tgsemoji112
+   # OR
+   python extract_emoji_pack.py https://t.me/addemoji/tgsemoji112
+   ```
+   This will save the emoji mapping to [custom_emoji_ids.json](file:///root/OTPBOT/data/custom_emoji_ids.json).
+
+2. The bot will automatically intercept outgoing messages and replace registered unicode characters with `<emoji id="...">` HTML tags.
+
+3. To preview flag emojis from the registered packs, you can run:
+   ```bash
+   python send_emoji_preview.py
+   ```
 
 ## Credit Plans
 
