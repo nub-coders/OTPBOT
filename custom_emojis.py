@@ -280,103 +280,73 @@ RECYCLE      = '♻️'
 import re
 import html
 
-def render_html(text: str) -> str:
-    """Convert Pyrogram markdown to HTML and replace registered emojis with custom emoji tags.
+def render_custom_emojis(text: str) -> str:
+    """Replace registered emojis with custom emoji tags.
     
-    Safe to call multiple times or on already formatted HTML.
+    This function tokenizes the text to avoid replacing emojis that are:
+    1. Inside HTML tags (e.g. <a href="...">)
+    2. Inside existing custom emoji tags (e.g. <emoji id="...">...</emoji>)
+    3. Inside inline code (`...`) or code blocks (```...```)
     """
     if not isinstance(text, str) or not text:
         return text
 
-    # 1. Escape HTML special characters
-    escaped = html.escape(text)
-
-    # 2. Convert Pyrogram Markdown to HTML
-    # Placeholder token uses only letters/digits — NO markdown-special chars
-    # (no _ * ~ | `) so the bold/underline/italic passes below can't mangle it.
-    placeholders = []
-    def save_code_block(match):
-        content = match.group(1)
-        placeholders.append(f"<pre><code>{content}</code></pre>")
-        return f"XXCODEBLOCKPLACEHOLDER{len(placeholders) - 1}XX"
-
-    # Match ``` or ```` blocks
-    escaped = re.sub(r'```(?:[a-zA-Z0-9_-]+\n)?(.*?)\n?```', save_code_block, escaped, flags=re.DOTALL)
-
-    # Inline code: `text`
-    def save_inline_code(match):
-        content = match.group(1)
-        placeholders.append(f"<code>{content}</code>")
-        return f"XXCODEBLOCKPLACEHOLDER{len(placeholders) - 1}XX"
-    escaped = re.sub(r'`(.*?)`', save_inline_code, escaped)
-
-    # Bold: **text**
-    escaped = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
-    # Underline: __text__
-    escaped = re.sub(r'__(.*?)__', r'<u>\1</u>', escaped)
-    # Italic: *text*
-    escaped = re.sub(r'(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)', r'<i>\1</i>', escaped)
-    # Strikethrough: ~~text~~
-    escaped = re.sub(r'~~(.*?)~~', r'<s>\1</s>', escaped)
-    # Spoiler: ||text||
-    escaped = re.sub(r'\|\|(.*?)\|\|', r'<tg-spoiler>\1</tg-spoiler>', escaped)
-    # Links: [text](url)
-    escaped = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2">\1</a>', escaped)
-
-    # 3. Render Emojis in non-HTML parts
-    parts = re.split(r'(<[^>]+>|___CODE_BLOCK_PLACEHOLDER_\d+___)', escaped)
-    
     registry = _load_registry()
-    if registry:
-        sorted_emojis = sorted(registry.keys(), key=len, reverse=True)
-        escaped_emojis = [re.escape(e) for e in sorted_emojis]
-        pattern = '|'.join(escaped_emojis)
-        
-        if pattern:
-            emoji_re = re.compile(f'({pattern})')
-            
-            for i in range(len(parts)):
-                if i % 2 == 0:
-                    def replace_match(match):
-                        em_char = match.group(1)
-                        doc_id = pick_document_id(em_char)
-                        if doc_id is not None:
-                            return f'<emoji id="{doc_id}">{em_char}</emoji>'
-                        return em_char
-                    parts[i] = emoji_re.sub(replace_match, parts[i])
-                    
-    html_text = "".join(parts)
-    
-    # 4. Restore code blocks
-    for idx, ph in enumerate(placeholders):
-        html_text = html_text.replace(f"___CODE_BLOCK_PLACEHOLDER_{idx}___", ph)
-        
-    return html_text
+    if not registry:
+        return text
+
+    # Tokenize the text using a regex that matches tags and code blocks
+    pattern = re.compile(r'(<emoji\b[^>]*>[\s\S]*?</emoji>|```[\s\S]*?```|`[^`\n]+`|<[^>]+>)')
+    parts = pattern.split(text)
+
+    sorted_emojis = sorted(registry.keys(), key=len, reverse=True)
+    escaped_emojis = [re.escape(e) for e in sorted_emojis]
+    emoji_pattern = '|'.join(escaped_emojis)
+
+    if emoji_pattern:
+        emoji_re = re.compile(f'({emoji_pattern})')
+        for i in range(0, len(parts), 2):  # Only process non-matched parts (even indices)
+            def replace_match(match):
+                em_char = match.group(1)
+                doc_id = pick_document_id(em_char)
+                if doc_id is not None:
+                    return f'<emoji id="{doc_id}">{em_char}</emoji>'
+                return em_char
+            parts[i] = emoji_re.sub(replace_match, parts[i])
+
+    return "".join(parts)
 
 
 def patch_pyrogram_for_custom_emojis():
     """Monkey-patch Pyrogram Client methods to automatically render custom emojis.
-
-    Only Client-level methods are patched because Message.reply / .edit_text
-    call Client.send_message / .edit_message_text internally — patching both
-    levels caused double-rendering (html.escape ran twice, destroying tags).
     """
     from pyrogram import Client
     from pyrogram.enums import ParseMode
 
     orig_send_message = Client.send_message
     async def new_send_message(self, chat_id, text, parse_mode=None, *args, **kwargs):
-        if parse_mode is None or parse_mode == ParseMode.MARKDOWN:
-            text = render_html(text)
-            parse_mode = ParseMode.HTML
+        # Determine effective parse mode (if None, it defaults to client.parse_mode or ParseMode.DEFAULT)
+        effective_mode = parse_mode if parse_mode is not None else (self.parse_mode or ParseMode.DEFAULT)
+        
+        # If parse mode is disabled, do not render custom emojis
+        if effective_mode != ParseMode.DISABLED:
+            text = render_custom_emojis(text)
+            # If the user explicitly passed ParseMode.MARKDOWN, we convert it to ParseMode.DEFAULT (None)
+            # because the strict Markdown parser would escape the HTML <emoji> tags.
+            if parse_mode == ParseMode.MARKDOWN:
+                parse_mode = ParseMode.DEFAULT
+
         return await orig_send_message(self, chat_id, text, parse_mode=parse_mode, *args, **kwargs)
     Client.send_message = new_send_message
 
     orig_edit_message_text = Client.edit_message_text
     async def new_edit_message_text(self, chat_id, message_id, text, parse_mode=None, *args, **kwargs):
-        if parse_mode is None or parse_mode == ParseMode.MARKDOWN:
-            text = render_html(text)
-            parse_mode = ParseMode.HTML
+        effective_mode = parse_mode if parse_mode is not None else (self.parse_mode or ParseMode.DEFAULT)
+        if effective_mode != ParseMode.DISABLED:
+            text = render_custom_emojis(text)
+            if parse_mode == ParseMode.MARKDOWN:
+                parse_mode = ParseMode.DEFAULT
         return await orig_edit_message_text(self, chat_id, message_id, text, parse_mode=parse_mode, *args, **kwargs)
     Client.edit_message_text = new_edit_message_text
+
 
