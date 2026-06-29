@@ -2388,7 +2388,8 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             payments.check_razorpay_payment, qr_id, plan["amount_inr"],
         )
         if status == "paid":
-            await db.mark_pending_payment_done(qr_id)
+            if not await db.mark_pending_payment_done(qr_id):
+                return
             await db.add_credits(user_id, plan["credits"])
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
             new_balance = await db.get_credits(user_id)
