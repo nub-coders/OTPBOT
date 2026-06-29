@@ -1935,7 +1935,7 @@ def _register_handlers(app: Client):
             f"{em.PIN} **How it works:**\n"
             "  1. Buy credits via UPI or Crypto\n"
             "  2. Tap **Get Number** and select a country\n"
-            "  3. Pick an available number — 1 credit is deducted\n"
+            "  3. Pick an available number — credits are deducted\n"
             "  4. OTP messages arriving on that number are forwarded to you\n"
             "  5. The number auto-releases after the timeout\n\n"
             f"{em.FAQ} **Features:**\n"
