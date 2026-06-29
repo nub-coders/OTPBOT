@@ -12,7 +12,7 @@ async def get_user(telegram_id: int):
     return await db.users.find_one({"telegram_id": telegram_id})
 
 
-async def create_user(telegram_id: int, username: str, first_name: str, role: str = "user"):
+async def create_user(telegram_id: int, username: str, first_name: str, role: str = "user", referred_by: int = None):
     doc = {
         "telegram_id": telegram_id,
         "username": username or "",
@@ -20,6 +20,8 @@ async def create_user(telegram_id: int, username: str, first_name: str, role: st
         "role": role,
         "credits": 0,
         "is_active": True,
+        "referred_by": referred_by,
+        "referral_earned": 0,
         "created_at": datetime.now(timezone.utc),
     }
     await db.users.update_one(
@@ -456,3 +458,39 @@ async def get_session_price(session: dict) -> int | None:
     email_added = session.get("email_added", False)
     
     return await get_category_price(cc, year, email_added)
+
+
+# ── Referrals ──
+
+async def get_referral_count(telegram_id: int) -> int:
+    return await db.users.count_documents({"referred_by": telegram_id})
+
+
+async def get_referral_earned(telegram_id: int) -> int:
+    user = await get_user(telegram_id)
+    if not user:
+        return 0
+    return user.get("referral_earned", 0)
+
+
+async def add_referral_earning(telegram_id: int, amount: int):
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$inc": {"referral_earned": amount, "credits": amount}},
+    )
+
+
+async def has_made_purchase(telegram_id: int) -> bool:
+    return await db.payments.count_documents({"user_id": telegram_id}) > 0
+
+
+async def mark_referral_rewarded(telegram_id: int):
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"referral_rewarded": True}},
+    )
+
+
+async def is_referral_rewarded(telegram_id: int) -> bool:
+    user = await get_user(telegram_id)
+    return user is not None and user.get("referral_rewarded", False)
