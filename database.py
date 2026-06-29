@@ -52,6 +52,41 @@ async def get_all_users():
     return await db.users.find().to_list(None)
 
 
+# ── Verification ──
+
+async def is_verified(telegram_id: int) -> bool:
+    user = await get_user(telegram_id)
+    return user is not None and user.get("verified", False)
+
+
+async def mark_verified(telegram_id: int):
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"verified": True}},
+    )
+
+
+async def create_verify_token(telegram_id: int, token: str, ttl_seconds: int = 600):
+    await db.verify_tokens.delete_many({"telegram_id": telegram_id})
+    await db.verify_tokens.insert_one({
+        "telegram_id": telegram_id,
+        "token": token,
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+        "used": False,
+    })
+
+
+async def consume_verify_token(token: str) -> int | None:
+    doc = await db.verify_tokens.find_one_and_update(
+        {"token": token, "used": False, "expires_at": {"$gt": datetime.now(timezone.utc)}},
+        {"$set": {"used": True}},
+    )
+    if doc:
+        return doc["telegram_id"]
+    return None
+
+
 # ── Credits ──
 
 async def get_credits(telegram_id: int) -> int:

@@ -5,8 +5,20 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.otpbot-verify.rule=Host(`verify.nubcoder.com`)"
+      - "traefik.http.routers.otpbot-verify.entrypoints=websecure"
+      - "traefik.http.routers.otpbot-verify.tls.certresolver=letsencrypt"
+      - "traefik.http.services.otpbot-verify.loadbalancer.server.port=8888"
+    networks:
+      - web
     volumes:
       - bot-data:/app/data
+
+networks:
+  web:
+    external: true
 
 volumes:
   bot-data:
