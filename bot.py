@@ -544,7 +544,6 @@ def _register_handlers(app: Client):
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_cp:") else 0
 
         sessions = await db.get_all_sessions()
-        prices = await db.get_all_country_prices()
 
         countries = {}
         for s in sessions:
@@ -575,12 +574,15 @@ def _register_handlers(app: Client):
                 min_p = min(prices_list)
                 max_p = max(prices_list)
                 range_str = f"{min_p}-{max_p}" if min_p != max_p else f"{min_p}"
+                display_str = f"{range_str} credits per OTP"
+                btn_str = f"{range_str} cr"
             else:
-                range_str = str(prices.get(cc, 1))
+                display_str = "No price set"
+                btn_str = "No price set"
 
-            all_lines.append(f"{flag} **{name}** ({cc}) — **({range_str} credits per OTP)** — {info['active']}/{info['total']} numbers")
+            all_lines.append(f"{flag} **{name}** ({cc}) — **({display_str})** — {info['active']}/{info['total']} numbers")
             all_buttons.append([InlineKeyboardButton(
-                f"{flag} {name} — {range_str} cr",
+                f"{flag} {name} — {btn_str}",
                 callback_data=f"setcprice:{cc}",
             )])
 
@@ -703,8 +705,9 @@ def _register_handlers(app: Client):
                 acc_year = s.get("account_year")
                 year_str = f" ~{acc_year}" if acc_year else ""
                 p = await db.get_session_price(s)
+                price_str = f"{p} cr" if p is not None else "No price"
                 all_buttons.append([InlineKeyboardButton(
-                    f"{status_icon} {flag} {phone}{year_str} — {p} cr",
+                    f"{status_icon} {flag} {phone}{year_str} — {price_str}",
                     callback_data=f"num_actions:{phone}",
                 )])
 
@@ -767,6 +770,7 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         price = await db.get_session_price(session)
+        price_str = f"{price} credits" if price is not None else "Not set (not for sale)"
         status = session.get("status", "unknown")
         pwd = session.get("password", "")
         error = session.get("last_error", "")
@@ -779,7 +783,7 @@ def _register_handlers(app: Client):
             f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"{em.STATS} Status: **{status}**\n"
-            f"{em.MONEY} Price: **{price}** credits\n"
+            f"{em.MONEY} Price: **{price_str}**\n"
             f"{age_line}"
             f"{email_line}"
             f"{em.PASSWORD} Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
@@ -1432,7 +1436,15 @@ def _register_handlers(app: Client):
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_gn:") else 0
 
         sessions = await db.get_active_sessions()
-        if not sessions:
+        by_country = {}
+        for s in sessions:
+            p = await db.get_session_price(s)
+            if p is None:
+                continue
+            cc = s.get("country_code", "XX")
+            by_country.setdefault(cc, []).append((s, p))
+
+        if not by_country:
             await safe_edit(cq.message,
                 f"{em.PHONE} **No numbers available right now.**\n"
                 "Contact admin to add numbers.",
@@ -1440,27 +1452,19 @@ def _register_handlers(app: Client):
             )
             return
 
-        by_country = {}
-        for s in sessions:
-            cc = s.get("country_code", "XX")
-            by_country.setdefault(cc, []).append(s)
-
         all_buttons = []
         all_lines = []
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
-            nums = by_country[cc]
+            items = by_country[cc]
             
-            session_prices = []
-            for s in nums:
-                p = await db.get_session_price(s)
-                session_prices.append(p)
+            session_prices = [p for _, p in items]
             min_p = min(session_prices) if session_prices else 1
             max_p = max(session_prices) if session_prices else 1
             range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
             
-            available = sum(1 for s in nums if not clients.get_request_user(s["phone_number"]))
+            available = sum(1 for s, _ in items if not clients.get_request_user(s["phone_number"]))
             all_lines.append(f"{flag} {name} — **{range_str}** cr — {available} available")
             all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {range_str} cr ({available})",
@@ -1485,23 +1489,27 @@ def _register_handlers(app: Client):
             page = 0
 
         sessions = await db.get_active_sessions_by_country(cc)
-        if not sessions:
+        valid_sessions = []
+        session_prices = []
+        for s in sessions:
+            p = await db.get_session_price(s)
+            if p is not None:
+                valid_sessions.append(s)
+                session_prices.append(p)
+
+        if not valid_sessions:
             await cq.answer("No numbers available for this country.", show_alert=True)
             return
 
         flag = get_country_flag(cc)
         name = get_country_name(cc)
 
-        session_prices = []
-        for s in sessions:
-            p = await db.get_session_price(s)
-            session_prices.append(p)
         min_p = min(session_prices) if session_prices else 1
         max_p = max(session_prices) if session_prices else 1
         range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
 
         all_buttons = []
-        for i, s in enumerate(sessions):
+        for i, s in enumerate(valid_sessions):
             phone = s["phone_number"]
             masked = mask_phone(phone)
             year = s.get("account_year")
@@ -1555,6 +1563,10 @@ def _register_handlers(app: Client):
 
         cc = session.get("country_code", "XX")
         price = await db.get_session_price(session)
+        if price is None:
+            await cq.answer(f"{em.ERROR} This number is not configured for sale.", show_alert=True)
+            return
+
         credits = await db.get_credits(cq.from_user.id)
         if credits < price:
             await cq.answer(

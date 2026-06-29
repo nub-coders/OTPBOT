@@ -84,28 +84,8 @@ async def deduct_credits(telegram_id: int, amount: int) -> bool:
     return result.modified_count > 0
 
 
-# ── Country Pricing ──
+# ── Country Pricing (Removed) ──
 
-async def set_country_price(country_code: str, price: int):
-    await db.country_pricing.update_one(
-        {"country_code": country_code},
-        {"$set": {"country_code": country_code, "price": price}},
-        upsert=True,
-    )
-
-
-async def get_country_price(country_code: str) -> int:
-    doc = await db.country_pricing.find_one({"country_code": country_code})
-    if doc:
-        return doc.get("price", 50)
-    return 50
-
-
-async def get_all_country_prices() -> dict:
-    result = {}
-    async for doc in db.country_pricing.find():
-        result[doc["country_code"]] = doc["price"]
-    return result
 
 
 # ── Sessions ──
@@ -435,13 +415,9 @@ async def set_category_price(country_code: str, year: int | None, email_added: b
     )
 
 
-async def get_session_price(session: dict) -> int:
+async def get_session_price(session: dict) -> int | None:
     cc = session.get("country_code", "XX")
     year = session.get("account_year")
     email_added = session.get("email_added", False)
     
-    price = await get_category_price(cc, year, email_added)
-    if price is not None:
-        return price
-    
-    return await get_country_price(cc)
+    return await get_category_price(cc, year, email_added)
