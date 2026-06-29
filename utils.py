@@ -145,6 +145,7 @@ COUNTRY_CODES = [
     ("967", "YE", "Yemen", "\U0001f1fe\U0001f1ea"),
     ("260", "ZM", "Zambia", "\U0001f1ff\U0001f1f2"),
     ("263", "ZW", "Zimbabwe", "\U0001f1ff\U0001f1fc"),
+    ("268", "SZ", "Eswatini", "\U0001f1f8\U0001f1ff"),
 ]
 
 _PREFIX_MAP = sorted(COUNTRY_CODES, key=lambda x: len(x[0]), reverse=True)

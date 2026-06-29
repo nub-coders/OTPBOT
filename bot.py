@@ -1,6 +1,9 @@
 import asyncio
 import logging
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
+
+# Shorthand for button style
+S = enums.ButtonStyle
 from pyrogram.types import (
     Message,
     CallbackQuery,
@@ -22,6 +25,8 @@ import database as db
 import clients
 import payments
 from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone
+import custom_emojis as em
+em.patch_pyrogram_for_custom_emojis()
 
 log = logging.getLogger(__name__)
 
@@ -103,20 +108,20 @@ def create_bot() -> Client:
 def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton("📱 Get Number", callback_data="get_number"),
-            InlineKeyboardButton("📜 My History", callback_data="my_history"),
+            InlineKeyboardButton(f"{em.PHONE} Get Number", callback_data="get_number", style=S.PRIMARY),
+            InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.DEFAULT),
         ],
-        [InlineKeyboardButton("💳 Buy Credits", callback_data="buy_credits")],
+        [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
         [
-            InlineKeyboardButton("📞 Support", callback_data="support"),
-            InlineKeyboardButton("❓ Help", callback_data="help"),
+            InlineKeyboardButton(f"{em.PHONE} Support", callback_data="support", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
         ],
     ]
     if UPDATES_CHANNEL:
-        buttons[-1].append(InlineKeyboardButton("📢 Updates", url=UPDATES_CHANNEL))
+        buttons[-1].append(InlineKeyboardButton(f"{em.BROADCAST} Updates", url=UPDATES_CHANNEL, style=S.DEFAULT))
     if is_admin:
         buttons.append(
-            [InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")]
+            [InlineKeyboardButton(f"{em.GEAR} Admin Panel", callback_data="admin_panel", style=S.PRIMARY)]
         )
     return InlineKeyboardMarkup(buttons)
 
@@ -124,25 +129,26 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("➕ Add Number", callback_data="add_number"),
-            InlineKeyboardButton("📋 List Numbers", callback_data="list_numbers"),
+            InlineKeyboardButton(f"{em.ADD} Add Number", callback_data="add_number", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.PLAN} List Numbers", callback_data="list_numbers", style=S.DEFAULT),
         ],
         [
-            InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing"),
-            InlineKeyboardButton("🔴 Sold", callback_data="sold_list"),
+            InlineKeyboardButton(f"{em.MONEY} Country Pricing", callback_data="country_pricing", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.USERS} Users", callback_data="users_list", style=S.DEFAULT),
         ],
+        [InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.DEFAULT)],
         [
-            InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
-            InlineKeyboardButton("📊 Stats", callback_data="stats"),
+            InlineKeyboardButton(f"{em.MONEY} Add Credits", callback_data="add_credits", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.DEFAULT),
         ],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast_help")],
-        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
+        [InlineKeyboardButton(f"{em.BROADCAST} Broadcast", callback_data="broadcast_help", style=S.PRIMARY)],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
     ])
 
 
 def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Back", callback_data=target)],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=target, style=S.DEFAULT)],
     ])
 
 
@@ -152,11 +158,11 @@ def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, *, pi
     year_label = str(year) if year else "Unknown"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"✅ Yes, {cflag} {cname}", callback_data=yes_cb),
-            InlineKeyboardButton("❌ No", callback_data="cc_no"),
+            InlineKeyboardButton(f"{em.SUCCESS} Yes, {cflag} {cname}", callback_data=yes_cb, style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.ERROR} No", callback_data="cc_no", style=S.DANGER),
         ],
         [
-            InlineKeyboardButton("📅 Account Year: " + year_label, callback_data="ay_edit"),
+            InlineKeyboardButton(f"{em.CALENDAR} Account Year: " + year_label, callback_data="ay_edit", style=S.DEFAULT),
         ],
     ])
 
@@ -176,16 +182,16 @@ def paginate_buttons(items, page, cb_prefix, back_target):
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{cb_prefix}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"{cb_prefix}:{page - 1}", style=S.DEFAULT))
     if end < total:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"{cb_prefix}:{page + 1}"))
+        nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"{cb_prefix}:{page + 1}", style=S.PRIMARY))
 
     footer = []
     if nav:
         footer.append(nav)
-    footer.append([InlineKeyboardButton("🔙 Back", callback_data=back_target)])
+    footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data=back_target, style=S.DEFAULT)])
 
-    page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+    page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
     return page_items, footer, page_label
 
 
@@ -208,14 +214,14 @@ def _register_handlers(app: Client):
             if role != "admin":
                 uname = message.from_user.username or message.from_user.first_name or str(user_id)
                 await alert(app,
-                    f"👤 **New User Joined**\n\n"
-                    f"🆔 ID: `{user_id}`\n"
+                    f"{em.USER} **New User Joined**\n\n"
+                    f"{em.ID_BADGE} ID: `{user_id}`\n"
                     f"📛 Name: @{uname}"
                 )
             if role == "admin":
                 await message.reply(
-                    "👑 **Welcome, Admin!**\n\n"
-                    "You are the first user — you've been set as admin.\n"
+                    f"{em.OWNER} **Welcome, Admin!**\n\n"
+                    "You are the first user — youf've been set as admin.\n"
                     "Use the panel below to manage numbers and users.",
                     reply_markup=main_menu_kb(True),
                 )
@@ -223,9 +229,9 @@ def _register_handlers(app: Client):
 
         is_adm = await db.is_admin(user_id)
         credits = await db.get_credits(user_id)
-        credit_line = f"\n💰 Credits: **{credits}**"
+        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
         await message.reply(
-            "👋 **Welcome to OTP Bot!**\n\n"
+            f"{em.WAVE} **Welcome to OTP Bot!**\n\n"
             "Get OTP codes from monitored Telegram numbers.\n"
             f"Choose an option below:{credit_line}",
             reply_markup=main_menu_kb(is_adm),
@@ -235,17 +241,17 @@ def _register_handlers(app: Client):
     async def cb_main_menu(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
         credits = await db.get_credits(cq.from_user.id)
-        credit_line = f"\n💰 Credits: **{credits}**"
+        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
         await safe_edit(cq.message,
-            f"👋 **OTP Bot — Main Menu**\n\nChoose an option:{credit_line}",
+            f"{em.WAVE} **OTP Bot — Main Menu**\n\nChoose an option:{credit_line}",
             reply_markup=main_menu_kb(is_adm),
         )
 
     @app.on_callback_query(filters.regex("^support$"))
     async def cb_support(_, cq: CallbackQuery):
-        lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@')})" for h in SUPPORT_HANDLES)
+        lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@f')})" for h in SUPPORT_HANDLES)
         await safe_edit(cq.message,
-            f"📞 **Support**\n\n"
+            f"{em.PHONE} **Support**\n\n"
             f"Having issues? Contact any of our support agents:\n\n"
             f"{lines}\n\n"
             "We're here to help with purchases, login issues, or any questions.",
@@ -255,25 +261,25 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex("^admin_panel$"))
     async def cb_admin_panel(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
-        await safe_edit(cq.message, "⚙️ **Admin Panel**", reply_markup=admin_kb())
+        await safe_edit(cq.message, f"{em.GEAR} **Admin Panel**", reply_markup=admin_kb())
 
     # ── Add Number Flow ──
 
     @app.on_callback_query(filters.regex("^add_number$"))
     async def cb_add_number(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
         auth_states[cq.from_user.id] = {"step": "phone"}
         await safe_edit(cq.message,
-            "📱 **Add Number**\n\n"
+            f"{em.PHONE} **Add Number**\n\n"
             "Send the phone number in international format:\n"
             "Example: `+1234567890`\n\n"
             "Country and pricing will be detected automatically.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
             ]),
         )
 
@@ -285,7 +291,7 @@ def _register_handlers(app: Client):
                 await state["client"].disconnect()
             except Exception:
                 pass
-        await safe_edit(cq.message, "❌ Cancelled.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(cq.message, f"{em.ERROR} Cancelled.", reply_markup=back_kb("admin_panel"))
 
     # ── Country confirmation after adding number ──
 
@@ -300,16 +306,16 @@ def _register_handlers(app: Client):
         year = state.get("account_year")
         year_label = str(year) if year else "Unknown"
         await safe_edit(cq.message,
-            f"📅 **Adjust Account Year**\n\n"
+            f"{em.CALENDAR} **Adjust Account Year**\n\n"
             f"Auto-detected: **{year_label}**\n"
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("➖", callback_data="ay_adj:-1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1"),
                     InlineKeyboardButton(year_label, callback_data="noop"),
-                    InlineKeyboardButton("➕", callback_data="ay_adj:+1"),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1"),
                 ],
-                [InlineKeyboardButton("✅ Set", callback_data="ay_set")],
+                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set")],
             ]),
         )
 
@@ -325,15 +331,15 @@ def _register_handlers(app: Client):
         state["account_year"] = new_year
         year_label = str(new_year)
         await safe_edit(cq.message,
-            f"📅 **Adjust Account Year**\n\n"
+            f"{em.CALENDAR} **Adjust Account Year**\n\n"
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("➖", callback_data="ay_adj:-1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1"),
                     InlineKeyboardButton(year_label, callback_data="noop"),
-                    InlineKeyboardButton("➕", callback_data="ay_adj:+1"),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1"),
                 ],
-                [InlineKeyboardButton("✅ Set", callback_data="ay_set")],
+                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set")],
             ]),
         )
         await cq.answer()
@@ -350,9 +356,9 @@ def _register_handlers(app: Client):
         name = get_country_name(cc)
         phone = state["phone"]
         await safe_edit(cq.message,
-            f"✅ **Account year set to {year}**\n\n"
-            f"📱 `{phone}`\n"
-            f"🌍 Country: {flag} **{name}** ({cc})\n\n"
+            f"{em.SUCCESS} **Account year set to {year}**\n\n"
+            f"{em.PHONE} `{phone}`\n"
+            f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n\n"
             "Confirm and save?",
             reply_markup=_confirm_country_kb(flag, name, cc, year),
         )
@@ -379,13 +385,13 @@ def _register_handlers(app: Client):
             state["step"] = "set_new_category_price"
             state["pending_cc"] = cc
             await safe_edit(cq.message,
-                f"💰 **New Category Detected!**\n\n"
-                f"🌍 Country: {flag} **{name}** ({cc})\n"
-                f"📅 Year: **{year}**\n"
-                f"📧 Email Added: **{'Yes' if email_added else 'No'}**\n\n"
+                f"{em.MONEY} **New Category Detected!**\n\n"
+                f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+                f"{em.CALENDAR} Year: **{year}**\n"
+                f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")]
                 ])
             )
             return
@@ -398,17 +404,17 @@ def _register_handlers(app: Client):
         auth_states.pop(cq.from_user.id, None)
 
         await alert(app,
-            f"➕ **Number Added**\n\n"
-            f"🛡 Admin: `{cq.from_user.id}`\n"
-            f"📱 Number: `{phone}`\n"
+            f"{em.ADD} **Number Added**\n\n"
+            f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"💰 Price: {price} credits"
+            f"{em.MONEY} Price: {price} credits"
         )
 
         await safe_edit(cq.message,
-            f"✅ **Number added successfully!**\n\n"
-            f"📱 `{phone}` — {flag} {name}\n"
-            f"💰 Price: **{price}** credits per OTP",
+            f"{em.SUCCESS} **Number added successfully!**\n\n"
+            f"{em.PHONE} `{phone}` — {flag} {name}\n"
+            f"{em.MONEY} Price: **{price}** credits per OTP",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -421,11 +427,11 @@ def _register_handlers(app: Client):
 
         auth_states[cq.from_user.id]["step"] = "manual_country"
         await safe_edit(cq.message,
-            f"🌍 **Select Country for** `{state['phone']}`\n\n"
+            f"{em.GLOBE} **Select Country for** `{state['phone']}`\n\n"
             "Type the country name or send its flag emoji:\n"
             "Example: `India` or `🇮🇳`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
             ]),
         )
 
@@ -448,13 +454,13 @@ def _register_handlers(app: Client):
             state["step"] = "set_new_category_price"
             state["pending_cc"] = cc
             await safe_edit(cq.message,
-                f"💰 **New Category Detected!**\n\n"
-                f"🌍 Country: {flag} **{name}** ({cc})\n"
-                f"📅 Year: **{year}**\n"
-                f"📧 Email Added: **{'Yes' if email_added else 'No'}**\n\n"
+                f"{em.MONEY} **New Category Detected!**\n\n"
+                f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+                f"{em.CALENDAR} Year: **{year}**\n"
+                f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")]
                 ])
             )
             return
@@ -467,17 +473,17 @@ def _register_handlers(app: Client):
         auth_states.pop(cq.from_user.id, None)
 
         await alert(app,
-            f"➕ **Number Added**\n\n"
-            f"🛡 Admin: `{cq.from_user.id}`\n"
-            f"📱 Number: `{phone}`\n"
+            f"{em.ADD} **Number Added**\n\n"
+            f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"💰 Price: {price} credits"
+            f"{em.MONEY} Price: {price} credits"
         )
 
         await safe_edit(cq.message,
-            f"✅ **Number added successfully!**\n\n"
-            f"📱 `{phone}` — {flag} {name}\n"
-            f"💰 Price: **{price}** credits per OTP",
+            f"{em.SUCCESS} **Number added successfully!**\n\n"
+            f"{em.PHONE} `{phone}` — {flag} {name}\n"
+            f"{em.MONEY} Price: **{price}** credits per OTP",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -528,7 +534,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^country_pricing$|^pg_cp:\d+$"))
     async def cb_country_pricing(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_cp:") else 0
@@ -547,7 +553,7 @@ def _register_handlers(app: Client):
 
         if not countries:
             await safe_edit(cq.message,
-                "💰 **Country Pricing**\n\nNo numbers added yet.",
+                f"{em.MONEY} **Country Pricing**\n\nNo numbers added yet.",
                 reply_markup=back_kb("admin_panel"),
             )
             return
@@ -578,14 +584,14 @@ def _register_handlers(app: Client):
         start = page * PAGE_SIZE
         page_lines = all_lines[start:start + PAGE_SIZE]
         await safe_edit(cq.message,
-            "💰 **Country Pricing**\n\n" + "\n".join(page_lines) + page_label,
+            f"{em.MONEY} **Country Pricing**\n\n" + "\n".join(page_lines) + page_label,
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
     @app.on_callback_query(filters.regex(r"^setcprice:"))
     async def cb_setcprice(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         cc = cq.data.split(":", 1)[1]
@@ -606,23 +612,23 @@ def _register_handlers(app: Client):
                 price = cat.get("price", 1)
                 email_str = "Yes" if email else "No"
                 
-                lines.append(f"📅 Year: **{year}** | 📧 Email: **{email_str}** — **{price}** cr")
+                lines.append(f"{em.CALENDAR} Year: **{year}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
                 buttons.append([InlineKeyboardButton(
-                    f"✏️ {year} | Email: {email_str} — {price} cr",
+                    f"{em.EDIT} {year} | Email: {email_str} — {price} cr",
                     callback_data=f"editcat:{cc}:{year}:{email}",
                 )])
         
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="country_pricing")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="country_pricing")])
 
         await safe_edit(cq.message,
-            f"💰 **Category Pricing — {flag} {name} ({cc})**\n\n" + "\n".join(lines),
+            f"{em.MONEY} **Category Pricing — {flag} {name} ({cc})**\n\n" + "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     @app.on_callback_query(filters.regex(r"^editcat:"))
     async def cb_editcat(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         parts = cq.data.split(":")
@@ -639,13 +645,13 @@ def _register_handlers(app: Client):
         
         email_str = "Yes" if email else "No"
         await safe_edit(cq.message,
-            f"💰 **Update Category Price**\n\n"
-            f"🌍 Country: {get_country_flag(cc)} {get_country_name(cc)}\n"
-            f"📅 Year: **{year}**\n"
-            f"📧 Email Added: **{email_str}**\n\n"
+            f"{em.MONEY} **Update Category Price**\n\n"
+            f"{em.GLOBE} Country: {get_country_flag(cc)} {get_country_name(cc)}\n"
+            f"{em.CALENDAR} Year: **{year}**\n"
+            f"{em.MAIL} Email Added: **{email_str}**\n\n"
             f"Send the new price (in credits) for this category:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"setcprice:{cc}")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"setcprice:{cc}")]
             ])
         )
 
@@ -654,7 +660,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^list_numbers$|^pg_ln:\d+$"))
     async def cb_list_numbers(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ln:") else 0
@@ -662,7 +668,7 @@ def _register_handlers(app: Client):
         sessions = [s for s in await db.get_all_sessions() if s.get("status") != "sold"]
         if not sessions:
             await safe_edit(cq.message,
-                "📋 **No numbers added yet.**",
+                f"{em.PLAN} **No numbers added yet.**",
                 reply_markup=back_kb("admin_panel"),
             )
             return
@@ -680,7 +686,7 @@ def _register_handlers(app: Client):
             country_lines.append(f"{flag} {name}: **{count}**")
 
         summary = (
-            f"📋 **Registered Numbers:** {len(sessions)} total\n\n"
+            f"{em.PLAN} **Registered Numbers:** {len(sessions)} total\n\n"
             + "\n".join(country_lines)
         )
 
@@ -689,7 +695,7 @@ def _register_handlers(app: Client):
             flag = get_country_flag(cc)
             for s in by_country[cc]:
                 phone = s["phone_number"]
-                status_icon = {"active": "🟢", "sold": "🔴", "error": "⚠️"}.get(s.get("status"), "⚪")
+                status_icon = {"active": f"{em.ONLINE}", "sold": f"{em.OFFLINE}", "error": f"{em.WARNING}"}.get(s.get("status"), f"{em.IDLE}")
                 acc_year = s.get("account_year")
                 year_str = f" ~{acc_year}" if acc_year else ""
                 p = await db.get_session_price(s)
@@ -708,16 +714,16 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^rm:"))
     async def cb_remove_number(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
         await safe_edit(cq.message,
-            f"⚠️ Remove `{phone}` and disconnect its session?",
+            f"{em.WARNING} Remove `{phone}` and disconnect its session?",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Yes", callback_data=f"confirm_rm:{phone}"),
-                    InlineKeyboardButton("❌ No", callback_data="list_numbers"),
+                    InlineKeyboardButton(f"{em.SUCCESS} Yes", callback_data=f"confirm_rm:{phone}"),
+                    InlineKeyboardButton(f"{em.ERROR} No", callback_data="list_numbers"),
                 ],
             ]),
         )
@@ -725,18 +731,18 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^confirm_rm:"))
     async def cb_confirm_remove(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
         await clients.remove_client(phone)
         await alert(app,
-            f"🗑 **Number Removed**\n\n"
-            f"🛡 Admin: `{cq.from_user.id}`\n"
-            f"📱 Number: `{phone}`"
+            f"{em.DELETE} **Number Removed**\n\n"
+            f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
+            f"{em.PHONE} Number: `{phone}`"
         )
         await safe_edit(cq.message,
-            f"✅ `{phone}` removed.", reply_markup=back_kb("admin_panel")
+            f"{em.SUCCESS} `{phone}` removed.", reply_markup=back_kb("admin_panel")
         )
 
     # ── Per-number actions ──
@@ -744,7 +750,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^num_actions:"))
     async def cb_num_actions(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -761,43 +767,43 @@ def _register_handlers(app: Client):
         pwd = session.get("password", "")
         error = session.get("last_error", "")
         acc_year = session.get("account_year")
-        age_line = f"📅 **Account:** created ~{acc_year}\n" if acc_year else ""
+        age_line = f"{em.CALENDAR} **Account:** created ~{acc_year}\n" if acc_year else ""
         email_added = session.get("email_added", False)
-        email_line = f"📧 **Email Added:** {'Yes' if email_added else 'No'}\n"
+        email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
         info = (
-            f"📱 **Number:** `{phone}`\n"
+            f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
-            f"📊 Status: **{status}**\n"
-            f"💰 Price: **{price}** credits\n"
+            f"{em.STATS} Status: **{status}**\n"
+            f"{em.MONEY} Price: **{price}** credits\n"
             f"{age_line}"
             f"{email_line}"
-            f"🔐 Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
+            f"{em.PASSWORD} Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
         )
         if error:
             info += f"❗ Last error: `{error[:120]}`\n"
 
         buttons = [
             [
-                InlineKeyboardButton("🔍 Verify", callback_data=f"verify:{phone}"),
-                InlineKeyboardButton("🔐 Update Password", callback_data=f"updpwd:{phone}"),
+                InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}"),
+                InlineKeyboardButton(f"{em.PASSWORD} Update Password", callback_data=f"updpwd:{phone}"),
             ],
             [
-                InlineKeyboardButton("📝 Edit Category", callback_data=f"editnum:{phone}"),
-                InlineKeyboardButton("❌ Remove", callback_data=f"rm:{phone}"),
+                InlineKeyboardButton(f"{em.CONFIG} Edit Category", callback_data=f"editnum:{phone}"),
+                InlineKeyboardButton(f"{em.ERROR} Remove", callback_data=f"rm:{phone}"),
             ],
         ]
         if status != "active":
             buttons.insert(0, [InlineKeyboardButton(
-                "🔄 Re-list for Sale", callback_data=f"relist:{phone}",
+                f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}",
             )])
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="list_numbers")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="list_numbers")])
         await safe_edit(cq.message, info, reply_markup=InlineKeyboardMarkup(buttons))
 
     @app.on_callback_query(filters.regex(r"^relist:"))
     async def cb_relist(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -807,15 +813,15 @@ def _register_handlers(app: Client):
             return
 
         await db.set_session_status(phone, "active")
-        await cq.answer("✅ Number re-listed for sale!")
+        await cq.answer(f"{em.SUCCESS} Number re-listed for sale!")
 
         cc = session.get("country_code", "XX")
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         await safe_edit(cq.message,
-            f"✅ `{phone}` ({flag} {name}) is now **active** and available for sale.",
+            f"{em.SUCCESS} `{phone}` ({flag} {name}) is now **active** and available for sale.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
             ]),
         )
 
@@ -824,7 +830,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^sold_list$|^pg_sl:\d+$"))
     async def cb_sold_list(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_sl:") else 0
@@ -832,7 +838,7 @@ def _register_handlers(app: Client):
         sold = await db.get_sold_sessions()
         if not sold:
             await safe_edit(cq.message,
-                "🔴 **No sold numbers yet.**",
+                f"{em.OFFLINE} **No sold numbers yet.**",
                 reply_markup=back_kb("admin_panel"),
             )
             return
@@ -846,21 +852,21 @@ def _register_handlers(app: Client):
             acc_year = s.get("account_year")
             year_str = f" ~{acc_year}" if acc_year else ""
             all_buttons.append([InlineKeyboardButton(
-                f"🔴 {flag} {phone}{year_str} — {sold_price} cr",
+                f"{em.OFFLINE} {flag} {phone}{year_str} — {sold_price} cr",
                 callback_data=f"sold_detail:{phone}",
             )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_sl", "admin_panel")
 
         await safe_edit(cq.message,
-            f"🔴 **Sold Numbers:** {len(sold)} total" + page_label,
+            f"{em.OFFLINE} **Sold Numbers:** {len(sold)} total" + page_label,
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
     @app.on_callback_query(filters.regex(r"^sold_detail:"))
     async def cb_sold_detail(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -883,22 +889,22 @@ def _register_handlers(app: Client):
             buyer = await db.get_user(sold_to)
             if buyer:
                 bname = buyer.get("first_name") or buyer.get("username") or str(sold_to)
-                buyer_line = f"👤 **Buyer:** {bname} (`{sold_to}`)\n"
+                buyer_line = f"{em.USER} **Buyer:** {bname} (`{sold_to}`)\n"
             else:
-                buyer_line = f"👤 **Buyer ID:** `{sold_to}`\n"
+                buyer_line = f"{em.USER} **Buyer ID:** `{sold_to}`\n"
 
         sold_time = ""
         if sold_at:
-            sold_time = f"🕐 **Sold At:** {sold_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            sold_time = f"{em.CLOCK} **Sold At:** {sold_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
 
-        age_line = f"📅 **Account Year:** ~{acc_year}\n" if acc_year else ""
-        email_line = f"📧 **Email Added:** {'Yes' if email_added else 'No'}\n"
+        age_line = f"{em.CALENDAR} **Account Year:** ~{acc_year}\n" if acc_year else ""
+        email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
         info = (
-            f"🔴 **Sold Number**\n\n"
-            f"📱 **Number:** `{phone}`\n"
+            f"{em.OFFLINE} **Sold Number**\n\n"
+            f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
-            f"💰 **Price Paid:** {sold_price} credits\n"
+            f"{em.MONEY} **Price Paid:** {sold_price} credits\n"
             f"{buyer_line}"
             f"{sold_time}"
             f"{age_line}"
@@ -908,10 +914,10 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, info,
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("🔍 Verify", callback_data=f"verify:{phone}"),
-                    InlineKeyboardButton("🔄 Re-list for Sale", callback_data=f"relist:{phone}"),
+                    InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}"),
+                    InlineKeyboardButton(f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}"),
                 ],
-                [InlineKeyboardButton("🔙 Back", callback_data="sold_list")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="sold_list")],
             ]),
         )
 
@@ -934,15 +940,15 @@ def _register_handlers(app: Client):
                 "phone": phone,
             }
             await safe_edit(message,
-                f"⚠️ **New Category Detected!**\n\n"
-                f"📱 Number: `{phone}`\n"
-                f"🌍 Country: {flag} **{name}** ({cc})\n"
-                f"📅 Year: **{year_label}**\n"
-                f"📧 Email Added: **{email_str}**\n\n"
+                f"{em.WARNING} **New Category Detected!**\n\n"
+                f"{em.PHONE} Number: `{phone}`\n"
+                f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+                f"{em.CALENDAR} Year: **{year_label}**\n"
+                f"{em.MAIL} Email Added: **{email_str}**\n\n"
                 f"No price set for this combination.\n"
                 f"Send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")]
                 ]),
             )
             return
@@ -950,31 +956,31 @@ def _register_handlers(app: Client):
         price = await db.get_session_price(session)
         await safe_edit(message,
             f"{prefix}"
-            f"📝 **Edit Category — `{phone}`**\n\n"
-            f"🌍 Country: {flag} **{name}** ({cc})\n"
-            f"📅 Account Year: **{year_label}**\n"
-            f"📧 Email Added: **{email_str}**\n"
-            f"💰 Current Price: **{price}** credits\n\n"
+            f"{em.CONFIG} **Edit Category — `{phone}`**\n\n"
+            f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.MAIL} Email Added: **{email_str}**\n"
+            f"{em.MONEY} Current Price: **{price}** credits\n\n"
             "Select what to change:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"🌍 Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
                 [
-                    InlineKeyboardButton("➖", callback_data=f"echg_yr:{phone}:-1"),
-                    InlineKeyboardButton(f"📅 Year: {year_label}", callback_data="noop"),
-                    InlineKeyboardButton("➕", callback_data=f"echg_yr:{phone}:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1"),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop"),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1"),
                 ],
                 [InlineKeyboardButton(
-                    f"📧 Email: {email_str} — Tap to toggle",
+                    f"{em.MAIL} Email: {email_str} — Tap to toggle",
                     callback_data=f"echg_em:{phone}",
                 )],
-                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
             ]),
         )
 
     @app.on_callback_query(filters.regex(r"^editnum:"))
     async def cb_editnum(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -988,7 +994,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^echg_yr:"))
     async def cb_echg_yr(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         parts = cq.data.split(":")
@@ -1011,7 +1017,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^echg_em:"))
     async def cb_echg_em(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -1030,7 +1036,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^echg_cc:"))
     async def cb_echg_cc(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -1044,18 +1050,18 @@ def _register_handlers(app: Client):
             "phone": phone,
         }
         await safe_edit(cq.message,
-            f"🌍 **Change Country for** `{phone}`\n\n"
+            f"{em.GLOBE} **Change Country for** `{phone}`\n\n"
             "Type the country name or send its flag emoji:\n"
             "Example: `India` or `🇮🇳`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")],
             ]),
         )
 
     @app.on_callback_query(filters.regex(r"^echg_ccpick:"))
     async def cb_echg_ccpick(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         state = auth_states.get(cq.from_user.id)
@@ -1075,12 +1081,12 @@ def _register_handlers(app: Client):
 
         session = await db.get_session(phone)
         if session:
-            await _edit_category_view(cq.message, phone, session, prefix="✅ Country updated!\n\n")
+            await _edit_category_view(cq.message, phone, session, prefix=f"{em.SUCCESS} Country updated!\n\n")
 
     @app.on_callback_query(filters.regex(r"^verify:"))
     async def cb_verify(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -1089,33 +1095,33 @@ def _register_handlers(app: Client):
             await cq.answer("Number not found.", show_alert=True)
             return
 
-        await safe_edit(cq.message, f"⏳ Verifying `{phone}`...")
+        await safe_edit(cq.message, f"{em.LOADING} Verifying `{phone}`...")
 
         ok, error = await clients.verify_session(phone, session["session_string"])
         if ok:
             await db.set_session_status(phone, "active")
             await safe_edit(cq.message,
-                f"✅ `{phone}` — session is **valid**!",
+                f"{em.SUCCESS} `{phone}` — session is **valid**!",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
                 ]),
             )
         else:
             await db.set_session_status(phone, "error", error)
             await safe_edit(cq.message,
-                f"❌ `{phone}` — verification failed\n\n"
+                f"{em.ERROR} `{phone}` — verification failed\n\n"
                 f"❗ Error: `{error[:200]}`\n\n"
                 "Would you like to re-add this number?",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Re-add Number", callback_data=f"readd:{phone}")],
-                    [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}")],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
                 ]),
             )
 
     @app.on_callback_query(filters.regex(r"^readd:"))
     async def cb_readd(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -1123,7 +1129,7 @@ def _register_handlers(app: Client):
         old_cc = old_session.get("country_code", "XX") if old_session else "XX"
         auth_states[cq.from_user.id] = {"step": "phone", "prefill_phone": phone, "old_country": old_cc}
         await safe_edit(cq.message,
-            f"🔄 **Re-adding** `{phone}`\n\n"
+            f"{em.PENDING} **Re-adding** `{phone}`\n\n"
             "A new code will be sent. Enter the verification code when received.",
         )
         await _handle_phone_direct(cq.from_user.id, phone, cq.message)
@@ -1131,7 +1137,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^updpwd:"))
     async def cb_updpwd(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         phone = cq.data.split(":", 1)[1]
@@ -1140,7 +1146,7 @@ def _register_handlers(app: Client):
             await cq.answer("Number not found.", show_alert=True)
             return
 
-        await safe_edit(cq.message, f"⏳ Connecting to `{phone}`...")
+        await safe_edit(cq.message, f"{em.LOADING} Connecting to `{phone}`...")
 
         client = Client(
             name=f"pwdupd_{phone.replace('+', '')}",
@@ -1158,9 +1164,9 @@ def _register_handlers(app: Client):
             except Exception:
                 pass
             await safe_edit(cq.message,
-                f"❌ Failed to connect: `{e}`",
+                f"{em.ERROR} Failed to connect: `{e}`",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
                 ]),
             )
             return
@@ -1174,44 +1180,95 @@ def _register_handlers(app: Client):
 
         if session.get("password"):
             await safe_edit(cq.message,
-                f"🔐 **Update Password for** `{phone}`\n\n"
+                f"{em.PASSWORD} **Update Password for** `{phone}`\n\n"
                 f"Current stored password: `{session['password']}`\n\n"
                 "Send the **current 2FA password** to verify:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
                 ]),
             )
         else:
             await safe_edit(cq.message,
-                f"🔐 **Update Password for** `{phone}`\n\n"
+                f"{em.PASSWORD} **Update Password for** `{phone}`\n\n"
                 "No password stored. Send the **current 2FA password**:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
                 ]),
             )
+
+    # ── Users ──
+
+    @app.on_callback_query(filters.regex(r"^users_list$|^pg_ul:\d+$"))
+    async def cb_users_list(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ul:") else 0
+
+        all_users = await db.get_all_users()
+        sold = await db.get_sold_sessions()
+        buyer_ids = {s["sold_to"] for s in sold if "sold_to" in s}
+        users = [u for u in all_users if u.get("credits", 0) > 0 or u["telegram_id"] in buyer_ids]
+
+        if not users:
+            await safe_edit(cq.message,
+                f"{em.USERS} **No users yet.**", reply_markup=back_kb("admin_panel")
+            )
+            return
+
+        all_buttons = []
+        for u in users:
+            role_icon = f"{em.OWNER}" if u["role"] == "admin" else f"{em.USER}"
+            name = u.get("first_name") or u.get("username") or str(u["telegram_id"])
+            credits = u.get("credits", 0)
+            all_buttons.append([
+                InlineKeyboardButton(
+                    f"{role_icon} {name} — {em.MONEY} {credits}",
+                    callback_data=f"noop",
+                )
+            ])
+
+        page_btns = all_buttons[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+        total_pages = (len(all_buttons) + PAGE_SIZE - 1) // PAGE_SIZE
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_ul:{page - 1}"))
+        if (page + 1) * PAGE_SIZE < len(all_buttons):
+            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_ul:{page + 1}"))
+        if nav:
+            page_btns.append(nav)
+        page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+        page_btns.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel")])
+
+        await safe_edit(cq.message,
+            f"{em.USERS} **Users** ({len(users)})" + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns),
+        )
 
     # ── Credits ──
 
     @app.on_callback_query(filters.regex("^add_credits$"))
     async def cb_add_credits(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         await safe_edit(cq.message,
-            "💰 **Add Credits**\n\n"
+            f"{em.MONEY} **Add Credits**\n\n"
             "Use the command:\n"
             "`/addcred <userid> <credits>`\n\n"
             "**Example:**\n"
             "`/addcred 123456789 50`\n\n"
-            "You can find user IDs in the **Stats** section.",
+            "You can find user IDs in the **Users** section.",
             reply_markup=back_kb("admin_panel"),
         )
 
     @app.on_message(filters.command("addcred") & filters.private)
     async def cmd_addcred(_, message: Message):
         if not await db.is_admin(message.from_user.id):
-            await message.reply("⛔ Admin only.")
+            await message.reply(f"{em.BLOCKED} Admin only.")
             return
 
         parts = message.text.split()
@@ -1225,21 +1282,21 @@ def _register_handlers(app: Client):
         try:
             target_id = int(parts[1])
         except ValueError:
-            await message.reply("❌ Invalid user ID.")
+            await message.reply(f"{em.ERROR} Invalid user ID.")
             return
 
         try:
             amount = int(parts[2])
             if amount <= 0:
-                await message.reply("❌ Credits must be a positive number.")
+                await message.reply(f"{em.ERROR} Credits must be a positive number.")
                 return
         except ValueError:
-            await message.reply("❌ Invalid credits amount.")
+            await message.reply(f"{em.ERROR} Invalid credits amount.")
             return
 
         target = await db.get_user(target_id)
         if not target:
-            await message.reply(f"❌ User `{target_id}` not found.")
+            await message.reply(f"{em.ERROR} User `{target_id}` not found.")
             return
 
         await db.add_credits(target_id, amount)
@@ -1247,26 +1304,26 @@ def _register_handlers(app: Client):
         name = target.get("first_name") or target.get("username") or str(target_id)
 
         await alert(app,
-            f"👑 **Admin Added Credits**\n\n"
-            f"🛡 Admin: `{message.from_user.id}`\n"
-            f"👤 Target: `{target_id}` ({name})\n"
-            f"➕ Credits: +{amount}\n"
-            f"💰 New balance: {new_balance}"
+            f"{em.OWNER} **Admin Added Credits**\n\n"
+            f"{em.SHIELD} Admin: `{message.from_user.id}`\n"
+            f"{em.USER} Target: `{target_id}` ({name})\n"
+            f"{em.ADD} Credits: +{amount}\n"
+            f"{em.MONEY} New balance: {new_balance}"
         )
 
         await message.reply(
-            f"✅ **Credits added!**\n\n"
-            f"👤 User: **{name}**\n"
-            f"➕ Added: **{amount}**\n"
-            f"💰 New balance: **{new_balance}**",
+            f"{em.SUCCESS} **Credits added!**\n\n"
+            f"{em.USER} User: **{name}**\n"
+            f"{em.ADD} Added: **{amount}**\n"
+            f"{em.MONEY} New balance: **{new_balance}**",
         )
 
         try:
             await bot.send_message(
                 target_id,
-                f"💰 **Credits added!**\n\n"
-                f"➕ {amount} credits added to your account.\n"
-                f"💰 New balance: **{new_balance}**",
+                f"{em.MONEY} **Credits added!**\n\n"
+                f"{em.ADD} {amount} credits added to your account.\n"
+                f"{em.MONEY} New balance: **{new_balance}**",
             )
         except Exception:
             pass
@@ -1276,27 +1333,27 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex("^broadcast_help$"))
     async def cb_broadcast_help(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
         await safe_edit(cq.message,
-            "📢 **Broadcast Message**\n\n"
+            f"{em.BROADCAST} **Broadcast Message**\n\n"
             "Reply to any message with:\n\n"
             "`/broadcast` — copies the message to all users (no sender shown)\n"
             "`/broadcast -name` — forwards the message (original sender visible)\n\n"
-            "📌 Must be used as a **reply** to the message you want to broadcast.",
+            f"{em.PIN} Must be used as a **reply** to the message you want to broadcast.",
             reply_markup=back_kb("admin_panel"),
         )
 
     @app.on_message(filters.command("broadcast") & filters.private)
     async def cmd_broadcast(_, message: Message):
         if not await db.is_admin(message.from_user.id):
-            await message.reply("⛔ Admin only.")
+            await message.reply(f"{em.BLOCKED} Admin only.")
             return
 
         target = message.reply_to_message
         if not target:
             await message.reply(
-                "❌ **Reply to a message** to broadcast it.\n\n"
+                f"{em.ERROR} **Reply to a message** to broadcast it.\n\n"
                 "`/broadcast` — copy (no sender shown)\n"
                 "`/broadcast -name` — forward (sender visible)"
             )
@@ -1307,11 +1364,11 @@ def _register_handlers(app: Client):
         include_name = flag == "-name"
 
         if flag and not include_name:
-            await message.reply("❌ Unknown flag. Use `/broadcast` or `/broadcast -name`.")
+            await message.reply(f"{em.ERROR} Unknown flag. Use `/broadcast` or `/broadcast -name`.")
             return
 
         users = await db.get_all_users()
-        status_msg = await message.reply(f"⏳ Broadcasting to {len(users)} users...")
+        status_msg = await message.reply(f"{em.LOADING} Broadcasting to {len(users)} users...")
 
         sent = 0
         failed = 0
@@ -1331,9 +1388,9 @@ def _register_handlers(app: Client):
 
         await safe_edit(
             status_msg,
-            f"✅ **Broadcast complete!**\n\n"
-            f"📨 Sent: **{sent}**\n"
-            f"❌ Failed: **{failed}**",
+            f"{em.SUCCESS} **Broadcast complete!**\n\n"
+            f"{em.MAIL} Sent: **{sent}**\n"
+            f"{em.ERROR} Failed: **{failed}**",
         )
 
     # ── Stats ──
@@ -1341,7 +1398,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex("^stats$"))
     async def cb_stats(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
 
         s = await db.get_stats()
@@ -1354,13 +1411,13 @@ def _register_handlers(app: Client):
             pay_lines += f"\n  {method}: {info['count']} payments, {info['total']:.2f}"
 
         await safe_edit(cq.message,
-            f"📊 **Statistics**\n\n"
-            f"👥 Users: {s['users']}\n"
-            f"📱 Numbers (DB): {s['sessions']}\n"
-            f"🟢 Connected: {active}\n"
-            f"🔗 Assigned now: {assigned}\n"
-            f"📨 OTPs forwarded: {s['otps']}\n\n"
-            f"💳 **Payments:** {ps['total_payments']}{pay_lines}",
+            f"{em.STATS} **Statistics**\n\n"
+            f"{em.USERS} Users: {s['users']}\n"
+            f"{em.PHONE} Numbers (DB): {s['sessions']}\n"
+            f"{em.ONLINE} Connected: {active}\n"
+            f"{em.LINK} Assigned now: {assigned}\n"
+            f"{em.MAIL} OTPs forwarded: {s['otps']}\n\n"
+            f"{em.CREDIT} **Payments:** {ps['total_payments']}{pay_lines}",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -1373,7 +1430,7 @@ def _register_handlers(app: Client):
         sessions = await db.get_active_sessions()
         if not sessions:
             await safe_edit(cq.message,
-                "📱 **No numbers available right now.**\n"
+                f"{em.PHONE} **No numbers available right now.**\n"
                 "Contact admin to add numbers.",
                 reply_markup=back_kb("main_menu"),
             )
@@ -1410,7 +1467,7 @@ def _register_handlers(app: Client):
         start = page * PAGE_SIZE
         page_lines = all_lines[start:start + PAGE_SIZE]
         await safe_edit(cq.message,
-            "🌍 **Select a Country**\n\n" + "\n".join(page_lines) + page_label,
+            f"{em.GLOBE} **Select a Country**\n\n" + "\n".join(page_lines) + page_label,
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
@@ -1445,17 +1502,17 @@ def _register_handlers(app: Client):
             masked = mask_phone(phone)
             year = s.get("account_year")
             year_str = f" ({year})" if year else ""
-            email_icon = " 📧" if s.get("email_added") else ""
+            email_icon = f" {em.MAIL}" if s.get("email_added") else ""
             p = session_prices[i]
             assigned = clients.get_request_user(phone)
             if assigned:
                 all_buttons.append([
-                    InlineKeyboardButton(f"🔴 {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"{em.OFFLINE} {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop")
                 ])
             else:
                 all_buttons.append([
                     InlineKeyboardButton(
-                        f"🟢 {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}"
+                        f"{em.ONLINE} {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}"
                     )
                 ])
 
@@ -1463,8 +1520,8 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{flag} **{name}** — **{range_str}** credits per OTP\n\n"
             f"Select a number:\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
-            f"ℹ️ **Note:** Your credit will be deducted on choosing the number\n"
+            f"{em.TIMER} Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
+            f"{em.INFO} **Note:** Your credit will be deducted on choosing the number\n"
             f"and will be refunded after 2 hours when manual release.",
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
@@ -1484,12 +1541,12 @@ def _register_handlers(app: Client):
 
         session = await db.get_session(phone)
         if not session or session.get("status") != "active":
-            await cq.answer("❌ Number not available.", show_alert=True)
+            await cq.answer(f"{em.ERROR} Number not available.", show_alert=True)
             return
 
         existing = clients.get_request_user(phone)
         if existing and existing != cq.from_user.id:
-            await cq.answer("🔴 Already assigned to someone else.", show_alert=True)
+            await cq.answer(f"{em.OFFLINE} Already assigned to someone else.", show_alert=True)
             return
 
         cc = session.get("country_code", "XX")
@@ -1497,39 +1554,39 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
         if credits < price:
             await cq.answer(
-                f"❌ You need {price} credits but have {credits}. Buy more credits!",
+                f"{em.ERROR} You need {price} credits but have {credits}. Buy more credits!",
                 show_alert=True,
             )
             return
 
-        await safe_edit(cq.message, "⏳ Connecting session...")
+        await safe_edit(cq.message, f"{em.LOADING} Connecting session...")
 
         try:
             await clients.start_session(phone, session["session_string"])
         except Exception as e:
             log.error("Failed to start session %s: %s", phone, e)
             await safe_edit(cq.message,
-                f"❌ Failed to connect `{mask_phone(phone)}`: `{e}`",
+                f"{em.ERROR} Failed to connect `{mask_phone(phone)}`: `{e}`",
                 reply_markup=back_kb("main_menu"),
             )
             return
 
         pwd = session.get("password", "")
         if pwd:
-            await safe_edit(cq.message, "⏳ Verifying password...")
+            await safe_edit(cq.message, f"{em.LOADING} Verifying password...")
             ok, err = await clients.check_password(phone, pwd)
             if not ok:
                 await clients.stop_session(phone)
                 await db.set_session_status(phone, "password_failed", err)
                 masked = mask_phone(phone)
                 await alert(app,
-                    f"🚨 **Password Check Failed**\n\n"
-                    f"📱 Number: `{phone}`\n"
-                    f"❌ Error: `{err[:200]}`\n"
-                    f"🔐 Stored password may be wrong or changed."
+                    f"{em.ALERT} **Password Check Failed**\n\n"
+                    f"{em.PHONE} Number: `{phone}`\n"
+                    f"{em.ERROR} Error: `{err[:200]}`\n"
+                    f"{em.PASSWORD} Stored password may be wrong or changed."
                 )
                 await safe_edit(cq.message,
-                    f"❌ Password verification failed for `{masked}`.\n\n"
+                    f"{em.ERROR} Password verification failed for `{masked}`.\n\n"
                     "This has been reported to the admins.",
                     reply_markup=back_kb("main_menu"),
                 )
@@ -1538,7 +1595,7 @@ def _register_handlers(app: Client):
         if not await db.deduct_credits(cq.from_user.id, price):
             await clients.stop_session(phone)
             await safe_edit(cq.message,
-                "❌ Failed to deduct credits. Try again.",
+                f"{em.ERROR} Failed to deduct credits. Try again.",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -1550,32 +1607,32 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         await alert(app,
-            f"📱 **Number Purchased**\n\n"
-            f"👤 User: `{cq.from_user.id}` (@{uname})\n"
-            f"📱 Number: `{phone}`\n"
+            f"{em.PHONE} **Number Purchased**\n\n"
+            f"{em.USER} User: `{cq.from_user.id}` (@{uname})\n"
+            f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"💰 Price: **{price}** credits"
+            f"{em.MONEY} Price: **{price}** credits"
         )
         credits = await db.get_credits(cq.from_user.id)
-        credit_line = f"\n💰 Credits: {credits}"
+        credit_line = f"\n{em.MONEY} Credits: {credits}"
         pwd = session.get("password", "")
-        pwd_line = f"\n🔐 2FA Password: `{pwd}`" if pwd else ""
+        pwd_line = f"\n{em.PASSWORD} 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
-        age_line = f"\n📅 Account created: ~{acc_year}" if acc_year else ""
+        age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
         email_added = session.get("email_added", False)
-        email_line = f"\n📧 Email Added: {'Yes' if email_added else 'No'}"
+        email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
         support = " | ".join(SUPPORT_HANDLES)
         await safe_edit(cq.message,
-            f"✅ **Number assigned!**\n\n"
+            f"{em.SUCCESS} **Number assigned!**\n\n"
             f"{flag} {name}\n"
-            f"📱 `{phone}`\n"
-            f"💰 Price: **{price}** credits (deducted)\n"
-            f"⏱ Timeout: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}{pwd_line}\n\n"
+            f"{em.PHONE} `{phone}`\n"
+            f"{em.MONEY} Price: **{price}** credits (deducted)\n"
+            f"{em.TIMER} Timeout: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}{pwd_line}\n\n"
             "Any OTP received on this number will be forwarded to you.\n\n"
-            "⚠️ On manual release, your credits will be locked for 2 hours.\n\n"
-            f"⚠️ Issues logging in? Contact support:\n{support}",
+            f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
+            f"{em.WARNING} Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔓 Release Number", callback_data=f"release:{phone}")],
+                [InlineKeyboardButton(f"{em.UNLOCK} Release Number", callback_data=f"release:{phone}")],
             ]),
         )
 
@@ -1596,7 +1653,7 @@ def _register_handlers(app: Client):
 
         if otp_received and not await db.is_admin(cq.from_user.id):
             await safe_edit(cq.message,
-                f"❌ Cannot release `{mask_phone(phone)}` — OTP was already forwarded.\n\n"
+                f"{em.ERROR} Cannot release `{mask_phone(phone)}` — OTP was already forwarded.\n\n"
                 "Number is marked as sold. No refund available.",
                 reply_markup=back_kb("main_menu"),
             )
@@ -1608,15 +1665,15 @@ def _register_handlers(app: Client):
         if otp_received:
             await db.mark_session_sold(phone, user_id, price)
             await safe_edit(cq.message,
-                f"🔓 `{mask_phone(phone)}` released.",
+                f"{em.UNLOCK} `{mask_phone(phone)}` released.",
                 reply_markup=back_kb("main_menu"),
             )
         else:
             if price > 0:
                 await db.save_pending_refund(user_id, phone, price)
             await safe_edit(cq.message,
-                f"🔓 `{mask_phone(phone)}` released.\n\n"
-                f"💰 **{price} credits** will be refunded in **2 hours**.",
+                f"{em.UNLOCK} `{mask_phone(phone)}` released.\n\n"
+                f"{em.MONEY} **{price} credits** will be refunded in **2 hours**.",
                 reply_markup=back_kb("main_menu"),
             )
 
@@ -1629,7 +1686,7 @@ def _register_handlers(app: Client):
         otps = await db.get_user_otps(cq.from_user.id, limit=200)
         if not otps:
             await safe_edit(cq.message,
-                "📜 **No OTP history yet.**",
+                f"{em.LOGS} **No OTP history yet.**",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -1648,18 +1705,18 @@ def _register_handlers(app: Client):
 
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_mh:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_mh:{page - 1}"))
         if end < len(all_lines):
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_mh:{page + 1}"))
+            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_mh:{page + 1}"))
 
         footer = []
         if nav:
             footer.append(nav)
-        footer.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
-        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+        footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")])
+        page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
 
         await safe_edit(cq.message,
-            "📜 **Recent OTPs:**\n\n" + "\n".join(page_lines) + page_label,
+            f"{em.LOGS} **Recent OTPs:**\n\n" + "\n".join(page_lines) + page_label,
             reply_markup=InlineKeyboardMarkup(footer),
         )
 
@@ -1671,14 +1728,14 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
         buttons = [
             [
-                InlineKeyboardButton("💸 Razorpay (UPI)", callback_data="rz_plans"),
-                InlineKeyboardButton("🪙 Crypto (USDT)", callback_data="cr_plans"),
+                InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans"),
+                InlineKeyboardButton(f"{em.COIN} Crypto (USDT)", callback_data="cr_plans"),
             ],
-            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
         ]
         await safe_edit(cq.message,
-            f"💳 **Buy Credits**\n\n"
-            f"💰 Your balance: **{credits}**\n\n"
+            f"{em.CREDIT} **Buy Credits**\n\n"
+            f"{em.MONEY} Your balance: **{credits}**\n\n"
             "Choose a payment method:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -1692,10 +1749,10 @@ def _register_handlers(app: Client):
             buttons.append([InlineKeyboardButton(
                 plan["label"], callback_data=f"rz_pay:{key}",
             )])
-        buttons.append([InlineKeyboardButton("✏️ Custom Amount", callback_data="rz_custom")])
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="buy_credits")])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="rz_custom")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits")])
         await safe_edit(cq.message,
-            "💸 **Razorpay — Choose a plan:**",
+            f"{em.MONEY} **Razorpay — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1706,19 +1763,19 @@ def _register_handlers(app: Client):
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
-        await safe_edit(cq.message, "⏳ Generating QR code...")
+        await safe_edit(cq.message, f"{em.LOADING} Generating QR code...")
         qr = await asyncio.to_thread(
             payments.create_razorpay_qr, plan["label"], plan["amount_inr"], cq.from_user.id,
         )
         if not qr:
             return await safe_edit(cq.message,
-                "❌ Payment gateway error. Try later.",
+                f"{em.ERROR} Payment gateway error. Try later.",
                 reply_markup=back_kb("buy_credits"),
             )
 
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")],
+            [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
+            [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")],
         ])
 
         try:
@@ -1730,9 +1787,9 @@ def _register_handlers(app: Client):
             cq.from_user.id,
             photo=qr["image_url"],
             caption=(
-                f"📱 **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
-                f"🎁 You'll receive **{plan['credits']} credits**\n\n"
-                "⏱ Valid for 15 minutes."
+                f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
+                f"{em.GIFT} You'll receive **{plan['credits']} credits**\n\n"
+                f"{em.TIMER} Valid for 15 minutes."
             ),
             reply_markup=buttons,
         )
@@ -1758,11 +1815,11 @@ def _register_handlers(app: Client):
             payments.check_razorpay_payment, qr_id, plan["amount_inr"],
         )
         if status == "paid":
-            await cq.answer("✅ Payment received!", show_alert=True)
+            await cq.answer(f"{em.SUCCESS} Payment received!", show_alert=True)
         elif status == "expired":
-            await cq.answer("❌ QR expired. Generate a new one.", show_alert=True)
+            await cq.answer(f"{em.ERROR} QR expired. Generate a new one.", show_alert=True)
         else:
-            await cq.answer("⏳ Payment not detected yet. Wait a moment.", show_alert=True)
+            await cq.answer(f"{em.LOADING} Payment not detected yet. Wait a moment.", show_alert=True)
 
     # ── Crypto Plans ──
 
@@ -1774,10 +1831,10 @@ def _register_handlers(app: Client):
                 f"{plan['credits']} Credits — {plan['amount_usdt']} USDT",
                 callback_data=f"cr_net:{key}",
             )])
-        buttons.append([InlineKeyboardButton("✏️ Custom Amount", callback_data="cr_custom")])
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="buy_credits")])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="cr_custom")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits")])
         await safe_edit(cq.message,
-            "🪙 **Crypto — Choose a plan:**",
+            f"{em.COIN} **Crypto — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1788,10 +1845,10 @@ def _register_handlers(app: Client):
             [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}")],
             [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}")],
             [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}")],
-            [InlineKeyboardButton("🔙 Back", callback_data="cr_plans")],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans")],
         ]
         await safe_edit(cq.message,
-            "🌐 **Select network for USDT deposit:**",
+            f"{em.GLOBE} **Select network for USDT deposit:**",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1803,13 +1860,13 @@ def _register_handlers(app: Client):
         if not plan:
             return await cq.answer("Invalid plan.", show_alert=True)
 
-        await safe_edit(cq.message, "⏳ Fetching deposit address...")
+        await safe_edit(cq.message, f"{em.LOADING} Fetching deposit address...")
         ok, info = await asyncio.to_thread(
             payments.get_binance_deposit_address, "USDT", network,
         )
         if not ok:
             return await safe_edit(cq.message,
-                f"❌ Could not fetch address: {info.get('error')}\nTry later.",
+                f"{em.ERROR} Could not fetch address: {info.get('error')}\nTry later.",
                 reply_markup=back_kb("buy_credits"),
             )
 
@@ -1824,33 +1881,33 @@ def _register_handlers(app: Client):
         }
 
         text = (
-            f"🪙 **USDT Deposit**\n\n"
+            f"{em.COIN} **USDT Deposit**\n\n"
             f"Send **{plan['amount_usdt']} USDT** on **{net_label.get(network, network)}** to:\n\n"
             f"`{address}`\n"
             + (f"Memo/Tag: `{tag}`\n" if tag else "") +
             f"\nAfter sending, **reply with your TX hash** here.\n"
             f"Type `cancel` to abort.\n\n"
-            f"🎁 You'll receive **{plan['credits']} credits**"
+            f"{em.GIFT} You'll receive **{plan['creditsf']} credits**"
         )
         await safe_edit(cq.message,
             text,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_pay")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_pay")],
             ]),
         )
 
     @app.on_callback_query(filters.regex("^cancel_pay$"))
     async def cb_cancel_pay(_, cq: CallbackQuery):
         pay_states.pop(cq.from_user.id, None)
-        await safe_edit(cq.message, "❌ Payment cancelled.", reply_markup=back_kb("main_menu"))
+        await safe_edit(cq.message, f"{em.ERROR} Payment cancelled.", reply_markup=back_kb("main_menu"))
 
     @app.on_callback_query(filters.regex("^rz_custom$"))
     async def cb_rz_custom(_, cq: CallbackQuery):
         auth_states[cq.from_user.id] = {"step": "rz_custom_amount"}
         await safe_edit(cq.message,
-            "💬 **Enter the number of credits you want to purchase (minimum 10):**",
+            f"{em.SMS} **Enter the number of credits you want to purchase (minimum 10):**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")]
             ])
         )
 
@@ -1858,9 +1915,9 @@ def _register_handlers(app: Client):
     async def cb_cr_custom(_, cq: CallbackQuery):
         auth_states[cq.from_user.id] = {"step": "cr_custom_amount"}
         await safe_edit(cq.message,
-            "💬 **Enter the number of credits you want to purchase (minimum 10):**",
+            f"{em.SMS} **Enter the number of credits you want to purchase (minimum 10):**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")]
             ])
         )
 
@@ -1868,25 +1925,25 @@ def _register_handlers(app: Client):
 
     def _build_help_text(is_admin: bool) -> str:
         admin_section = (
-            "\n\n⚙️ **Admin Commands:**\n"
+            f"\n\n{em.GEAR} **Admin Commands:**\n"
             "  /addcred `<userid>` `<credits>` — Add credits to a user\n"
             "  /broadcast `<message>` — Broadcast to all users\n"
             "  /broadcast `-name` `<message>` — Broadcast with your name"
         ) if is_admin else ""
         return (
-            "❓ **Help — OTP Bot**\n\n"
-            "📌 **How it works:**\n"
+            f"{em.HELP} **Help — OTP Bot**\n\n"
+            f"{em.PIN} **How it works:**\n"
             "  1. Buy credits via UPI or Crypto\n"
             "  2. Tap **Get Number** and select a country\n"
             "  3. Pick an available number — 1 credit is deducted\n"
             "  4. OTP messages arriving on that number are forwarded to you\n"
             "  5. The number auto-releases after the timeout\n\n"
-            "💡 **Features:**\n"
-            "  • 📱 **Get Number** — Rent a number to receive OTPs\n"
-            "  • 📜 **My History** — View your past sessions\n"
-            "  • 💳 **Buy Credits** — Top up via UPI or USDT\n"
-            "  • 📞 **Support** — Contact our support agents\n\n"
-            "🔧 **Commands:**\n"
+            f"{em.FAQ} **Features:**\n"
+            f"  • {em.PHONE} **Get Number** — Rent a number to receive OTPs\n"
+            f"  • {em.LOGS} **My History** — View your past sessions\n"
+            f"  • {em.CREDIT} **Buy Credits** — Top up via UPI or USDT\n"
+            f"  • {em.PHONE} **Support** — Contact our support agents\n\n"
+            f"{em.SETTINGS} **Commands:**\n"
             "  /start — Main menu\n"
             "  /help — This help page\n"
             "  /cancel — Cancel current operation"
@@ -1950,11 +2007,11 @@ async def _handle_phone(message: Message, phone: str):
         phone = "+" + phone
 
     cc, cname, cflag = detect_country(phone)
-    status_msg = await message.reply(f"⏳ Sending code to `{phone}` ({cflag} {cname})...")
+    status_msg = await message.reply(f"{em.LOADING} Sending code to `{phone}` ({cflag} {cname})...")
 
     try:
         client = Client(
-            name=f"auth_{phone.replace('+', '')}",
+            name=f"auth_{phone.replace('+', 'f')}",
             api_id=API_ID,
             api_hash=API_HASH,
             in_memory=True,
@@ -1969,28 +2026,28 @@ async def _handle_phone(message: Message, phone: str):
             "country_code": cc,
         }
         await safe_edit(status_msg,
-            f"✅ Code sent to `{phone}` ({cflag} {cname})\n\n"
+            f"{em.SUCCESS} Code sent to `{phone}` ({cflag} {cname})\n\n"
             "Enter the verification code you received:\n\n"
-            "💡 If Telegram sent it as a message, "
+            f"{em.FAQ} If Telegram sent it as a message, "
             "add spaces or dots between digits to avoid the code being blocked.\n"
             "Example: `1 2 3 4 5` or `1.2.3.4.5`",
         )
     except PhoneNumberInvalid:
         auth_states.pop(user_id, None)
         await safe_edit(status_msg,
-            "❌ Invalid phone number format.",
+            f"{em.ERROR} Invalid phone number format.",
             reply_markup=back_kb("admin_panel"),
         )
     except FloodWait as e:
         auth_states.pop(user_id, None)
         await safe_edit(status_msg,
-            f"⚠️ FloodWait — try again in {e.value} seconds.",
+            f"{em.WARNING} FloodWait — try again in {e.value} seconds.",
             reply_markup=back_kb("admin_panel"),
         )
     except Exception as e:
         auth_states.pop(user_id, None)
         await safe_edit(status_msg,
-            f"❌ Error: `{e}`",
+            f"{em.ERROR} Error: `{e}`",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2002,7 +2059,7 @@ async def _handle_code(message: Message, code: str):
     phone = state["phone"]
 
     clean_code = code.replace(" ", "").replace(".", "").replace("-", "")
-    status_msg = await message.reply("⏳ Verifying code...")
+    status_msg = await message.reply(f"{em.LOADING} Verifying code...")
 
     try:
         await client.sign_in(
@@ -2026,21 +2083,21 @@ async def _handle_code(message: Message, code: str):
             "email_added": has_email,
         }
         await safe_edit(status_msg,
-            f"✅ Code verified for `{phone}`\n\n"
-            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
-            f"📅 Account year: **{acc_year or 'Unknown'}**\n"
-            f"📧 Email added: **{'Yes' if has_email else 'No'}**\n\n"
+            f"{em.SUCCESS} Code verified for `{phone}`\n\n"
+            f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
+            f"{em.CALENDAR} Account year: **{acc_year or 'Unknownf'}**\n"
+            f"{em.MAIL} Email added: **{'Yes' if has_email else 'Nof'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
     except SessionPasswordNeeded:
         auth_states[user_id]["step"] = "password"
         await safe_edit(status_msg,
-            "🔐 This account has 2FA enabled.\n"
+            f"{em.PASSWORD} This account has 2FA enabled.\n"
             "Enter the 2FA password:",
         )
     except PhoneCodeInvalid:
-        await safe_edit(status_msg, "❌ Invalid code. Try again:")
+        await safe_edit(status_msg, f"{em.ERROR} Invalid code. Try again:")
     except PhoneCodeExpired:
         auth_states.pop(user_id, None)
         try:
@@ -2048,7 +2105,7 @@ async def _handle_code(message: Message, code: str):
         except Exception:
             pass
         await safe_edit(status_msg,
-            "❌ Code expired. Start over.",
+            f"{em.ERROR} Code expired. Start over.",
             reply_markup=back_kb("admin_panel"),
         )
     except Exception as e:
@@ -2058,7 +2115,7 @@ async def _handle_code(message: Message, code: str):
         except Exception:
             pass
         await safe_edit(status_msg,
-            f"❌ Error: `{e}`",
+            f"{em.ERROR} Error: `{e}`",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2069,7 +2126,7 @@ async def _handle_password(message: Message, password: str):
     client: Client = state["client"]
     phone = state["phone"]
 
-    status_msg = await message.reply("⏳ Checking password...")
+    status_msg = await message.reply(f"{em.LOADING} Checking password...")
 
     try:
         await client.check_password(password)
@@ -2089,15 +2146,15 @@ async def _handle_password(message: Message, password: str):
             "email_added": has_email,
         }
         await safe_edit(status_msg,
-            f"✅ Password accepted for `{phone}`\n\n"
-            f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
-            f"📅 Account year: **{acc_year or 'Unknown'}**\n"
-            f"📧 Email added: **{'Yes' if has_email else 'No'}**\n\n"
+            f"{em.SUCCESS} Password accepted for `{phone}`\n\n"
+            f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
+            f"{em.CALENDAR} Account year: **{acc_year or 'Unknownf'}**\n"
+            f"{em.MAIL} Email added: **{'Yes' if has_email else 'Nof'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
     except PasswordHashInvalid:
-        await safe_edit(status_msg, "❌ Wrong password. Try again:")
+        await safe_edit(status_msg, f"{em.ERROR} Wrong password. Try again:")
     except Exception as e:
         auth_states.pop(user_id, None)
         try:
@@ -2105,7 +2162,7 @@ async def _handle_password(message: Message, password: str):
         except Exception:
             pass
         await safe_edit(status_msg,
-            f"❌ Error: `{e}`",
+            f"{em.ERROR} Error: `{e}`",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2116,7 +2173,7 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
     cc, cname, cflag = detect_country(phone)
     try:
         client = Client(
-            name=f"auth_{phone.replace('+', '')}",
+            name=f"auth_{phone.replace('+', 'f')}",
             api_id=API_ID,
             api_hash=API_HASH,
             in_memory=True,
@@ -2132,24 +2189,24 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
             "country_code": old_cc,
         }
         await safe_edit(reply_target,
-            f"🔄 **Re-adding** `{phone}` ({cflag} {cname})\n\n"
-            "✅ Code sent. Enter the verification code:\n\n"
-            "💡 Add spaces or dots between digits.\n"
+            f"{em.PENDING} **Re-adding** `{phone}` ({cflag} {cname})\n\n"
+            f"{em.SUCCESS} Code sent. Enter the verification code:\n\n"
+            f"{em.FAQ} Add spaces or dots between digits.\n"
             "Example: `1 2 3 4 5` or `1.2.3.4.5`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
             ]),
         )
     except FloodWait as e:
         auth_states.pop(user_id, None)
         await safe_edit(reply_target,
-            f"⚠️ FloodWait — try again in {e.value} seconds.",
+            f"{em.WARNING} FloodWait — try again in {e.value} seconds.",
             reply_markup=back_kb("admin_panel"),
         )
     except Exception as e:
         auth_states.pop(user_id, None)
         await safe_edit(reply_target,
-            f"❌ Error: `{e}`",
+            f"{em.ERROR} Error: `{e}`",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2160,10 +2217,10 @@ async def _handle_update_category_price(message: Message, text: str):
     try:
         price = int(text.strip())
         if price < 1:
-            await message.reply("❌ Price must be at least 1. Try again:")
+            await message.reply(f"{em.ERROR} Price must be at least 1. Try again:")
             return
     except ValueError:
-        await message.reply("❌ Invalid price. Send a number (e.g. `220`):")
+        await message.reply(f"{em.ERROR} Invalid price. Send a number (e.g. `220`):")
         return
         
     cc = state["country_code"]
@@ -2178,11 +2235,11 @@ async def _handle_update_category_price(message: Message, text: str):
     email_str = "Yes" if email else "No"
     
     await message.reply(
-        f"✅ Category price successfully updated!\n\n"
-        f"🌍 Country: {flag} **{name}** ({cc})\n"
-        f"📅 Year: **{year}**\n"
-        f"📧 Email: **{email_str}**\n"
-        f"💰 New Price: **{price}** credits per OTP",
+        f"{em.SUCCESS} Category price successfully updated!\n\n"
+        f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+        f"{em.CALENDAR} Year: **{year}**\n"
+        f"{em.MAIL} Email: **{email_str}**\n"
+        f"{em.MONEY} New Price: **{price}** credits per OTP",
         reply_markup=main_menu_kb(True),
     )
 
@@ -2197,7 +2254,7 @@ async def _handle_manual_country(message: Message, text: str):
     matches = search_country(text)
     if not matches:
         await message.reply(
-            "❌ No matching country found.\n"
+            f"{em.ERROR} No matching country found.\n"
             "Try the full country name (e.g. `India`) or send its flag emoji 🇮🇳:",
         )
         return
@@ -2209,10 +2266,10 @@ async def _handle_manual_country(message: Message, text: str):
         year = state.get("account_year")
         email_added = state.get("email_added", False)
         await message.reply(
-            f"🌍 Found: {flag} **{name}** ({cc})\n"
-            f"📅 Account year: **{year or 'Unknown'}**\n"
-            f"📧 Email added: **{'Yes' if email_added else 'No'}**\n\n"
-            f"Confirm this country for `{state['phone']}`?",
+            f"{em.GLOBE} Found: {flag} **{name}** ({cc})\n"
+            f"{em.CALENDAR} Account year: **{year or 'Unknownf'}**\n"
+            f"{em.MAIL} Email added: **{'Yes' if email_added else 'No'}**\n\n"
+            f"Confirm this country for `{state['phonef']}`?",
             reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
         )
         return
@@ -2221,9 +2278,9 @@ async def _handle_manual_country(message: Message, text: str):
         [InlineKeyboardButton(f"{flag} {name}", callback_data=f"cc_pick:{cc}")]
         for cc, name, flag in matches
     ]
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")])
+    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")])
     await message.reply(
-        "🌍 **Multiple matches found.** Pick one:",
+        f"{em.GLOBE} **Multiple matches found.** Pick one:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -2232,7 +2289,7 @@ async def _handle_update_password_old(message: Message, text: str):
     user_id = message.from_user.id
     auth_states[user_id]["old_password"] = text.strip()
     auth_states[user_id]["step"] = "update_password_new"
-    await message.reply("✅ Got it. Now send the **new 2FA password**:")
+    await message.reply(f"{em.SUCCESS} Got it. Now send the **new 2FA password**:")
 
 
 async def _handle_update_password_new(message: Message, text: str):
@@ -2243,7 +2300,7 @@ async def _handle_update_password_new(message: Message, text: str):
     old_password = state.get("old_password", "")
 
     new_password = text.strip()
-    status_msg = await message.reply("⏳ Updating password on Telegram...")
+    status_msg = await message.reply(f"{em.LOADING} Updating password on Telegram...")
 
     try:
         await client.update_password(new_password=new_password, old_password=old_password)
@@ -2251,13 +2308,13 @@ async def _handle_update_password_new(message: Message, text: str):
         await db.set_session_password(phone, new_password)
         auth_states.pop(user_id, None)
         await safe_edit(status_msg,
-            f"✅ Password updated for `{phone}`\n\n"
-            f"🔐 New password: `{new_password}`",
+            f"{em.SUCCESS} Password updated for `{phone}`\n\n"
+            f"{em.PASSWORD} New password: `{new_password}`",
             reply_markup=back_kb("admin_panel"),
         )
     except PasswordHashInvalid:
         await safe_edit(status_msg,
-            "❌ The old password was wrong. Send the correct **current 2FA password**:",
+            f"{em.ERROR} The old password was wrong. Send the correct **current 2FA password**:",
         )
         auth_states[user_id]["step"] = "update_password_old"
     except Exception as e:
@@ -2267,7 +2324,7 @@ async def _handle_update_password_new(message: Message, text: str):
         except Exception:
             pass
         await safe_edit(status_msg,
-            f"❌ Error updating password: `{e}`",
+            f"{em.ERROR} Error updating password: `{e}`",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2280,7 +2337,7 @@ async def _handle_edit_num_country(message: Message, text: str):
     matches = search_country(text)
     if not matches:
         await message.reply(
-            "❌ No matching country found.\n"
+            f"{em.ERROR} No matching country found.\n"
             "Try the full country name (e.g. `India`) or send its flag emoji 🇮🇳:",
         )
         return
@@ -2298,24 +2355,24 @@ async def _handle_edit_num_country(message: Message, text: str):
         price = await db.get_session_price(session) if session else 1
 
         await message.reply(
-            f"✅ Country updated to {flag} **{name}** ({cc})\n\n"
-            f"📝 **Edit Category — `{phone}`**\n\n"
-            f"🌍 Country: {flag} **{name}** ({cc})\n"
-            f"📅 Account Year: **{year_label}**\n"
-            f"📧 Email Added: **{email_str}**\n"
-            f"💰 Current Price: **{price}** credits",
+            f"{em.SUCCESS} Country updated to {flag} **{name}** ({cc})\n\n"
+            f"{em.CONFIG} **Edit Category — `{phone}`**\n\n"
+            f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.MAIL} Email Added: **{email_str}**\n"
+            f"{em.MONEY} Current Price: **{price}** credits",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"🌍 Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
                 [
-                    InlineKeyboardButton("➖", callback_data=f"echg_yr:{phone}:-1"),
-                    InlineKeyboardButton(f"📅 Year: {year_label}", callback_data="noop"),
-                    InlineKeyboardButton("➕", callback_data=f"echg_yr:{phone}:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1"),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop"),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1"),
                 ],
                 [InlineKeyboardButton(
-                    f"📧 Email: {email_str} — Tap to toggle",
+                    f"{em.MAIL} Email: {email_str} — Tap to toggle",
                     callback_data=f"echg_em:{phone}",
                 )],
-                [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
             ]),
         )
         return
@@ -2324,9 +2381,9 @@ async def _handle_edit_num_country(message: Message, text: str):
         [InlineKeyboardButton(f"{flag} {name}", callback_data=f"echg_ccpick:{cc}")]
         for cc, name, flag in matches
     ]
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"editnum:{phone}")])
+    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")])
     await message.reply(
-        "🌍 **Multiple matches found.** Pick one:",
+        f"{em.GLOBE} **Multiple matches found.** Pick one:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -2337,10 +2394,10 @@ async def _handle_edit_num_set_price(message: Message, text: str):
     try:
         price = int(text.strip())
         if price < 1:
-            await message.reply("❌ Price must be at least 1. Try again:")
+            await message.reply(f"{em.ERROR} Price must be at least 1. Try again:")
             return
     except ValueError:
-        await message.reply("❌ Invalid price. Send a number (e.g. `50`):")
+        await message.reply(f"{em.ERROR} Invalid price. Send a number (e.g. `50`):")
         return
 
     phone = state["phone"]
@@ -2348,7 +2405,7 @@ async def _handle_edit_num_set_price(message: Message, text: str):
 
     session = await db.get_session(phone)
     if not session:
-        await message.reply("❌ Number not found.", reply_markup=back_kb("admin_panel"))
+        await message.reply(f"{em.ERROR} Number not found.", reply_markup=back_kb("admin_panel"))
         return
 
     cc = session.get("country_code", "XX")
@@ -2363,13 +2420,13 @@ async def _handle_edit_num_set_price(message: Message, text: str):
     email_str = "Yes" if email else "No"
 
     await message.reply(
-        f"✅ **Category price set!**\n\n"
-        f"🌍 Country: {flag} **{name}** ({cc})\n"
-        f"📅 Year: **{year_label}**\n"
-        f"📧 Email: **{email_str}**\n"
-        f"💰 Price: **{price}** credits per OTP",
+        f"{em.SUCCESS} **Category price set!**\n\n"
+        f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
+        f"{em.CALENDAR} Year: **{year_label}**\n"
+        f"{em.MAIL} Email: **{email_str}**\n"
+        f"{em.MONEY} Price: **{price}** credits per OTP",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data=f"editnum:{phone}")],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"editnum:{phone}")],
         ]),
     )
 
@@ -2394,11 +2451,11 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
             new_balance = await db.get_credits(user_id)
             await alert(bot,
-                f"💳 **Credits Purchased (Razorpay)**\n\n"
-                f"👤 User: `{user_id}`\n"
-                f"🎁 Credits: +{plan['credits']}\n"
-                f"💵 Amount: ₹{plan['amount_inr'] // 100}\n"
-                f"💰 New balance: {new_balance}"
+                f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
+                f"{em.USER} User: `{user_id}`\n"
+                f"{em.GIFT} Credits: +{plan['creditsf']}\n"
+                f"{em.DOLLAR} Amount: ₹{plan['amount_infr'] // 100}\n"
+                f"{em.MONEY} New balance: {new_balance}"
             )
             try:
                 await qr_msg.delete()
@@ -2406,9 +2463,9 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
                 pass
             await bot.send_message(
                 user_id,
-                f"✅ **Payment received!**\n\n"
-                f"🎁 +{plan['credits']} credits added\n"
-                f"💰 New balance: **{new_balance}**",
+                f"{em.SUCCESS} **Payment received!**\n\n"
+                f"{em.GIFT} +{plan['creditsf']} credits added\n"
+                f"{em.MONEY} New balance: **{new_balance}**",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -2422,7 +2479,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
         pass
     await bot.send_message(
         user_id,
-        "⏳ Payment expired. Generate a new QR if needed.",
+        f"{em.LOADING} Payment expired. Generate a new QR if needed.",
         reply_markup=back_kb("buy_credits"),
     )
 
@@ -2432,26 +2489,26 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
 
     if text.lower() == "cancel":
         pay_states.pop(user_id, None)
-        await message.reply("❌ Cancelled.", reply_markup=back_kb("main_menu"))
+        await message.reply(f"{em.ERROR} Cancelled.", reply_markup=back_kb("main_menu"))
         return
 
     tx_hash = text.strip()
     if not ((tx_hash.startswith("0x") and len(tx_hash) == 66) or len(tx_hash) == 64):
-        await message.reply("❌ Invalid TX hash format. Send the 64-hex transaction ID.")
+        await message.reply(f"{em.ERROR} Invalid TX hash format. Send the 64-hex transaction ID.")
         return
 
     if await db.is_tx_used(tx_hash):
         pay_states.pop(user_id, None)
-        await message.reply("❌ This TX hash has already been used.")
+        await message.reply(f"{em.ERROR} This TX hash has already been used.")
         return
 
-    status_msg = await message.reply("⏳ Verifying deposit on Binance...")
+    status_msg = await message.reply(f"{em.LOADING} Verifying deposit on Binance...")
 
     plan_key = pstate["plan_key"]
     plan = get_crypto_plan(plan_key)
     if not plan:
         pay_states.pop(user_id, None)
-        await safe_edit(status_msg, "❌ Invalid plan.", reply_markup=back_kb("main_menu"))
+        await safe_edit(status_msg, f"{em.ERROR} Invalid plan.", reply_markup=back_kb("main_menu"))
         return
 
     ok, reason = await asyncio.to_thread(
@@ -2459,7 +2516,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     )
 
     if not ok:
-        await safe_edit(status_msg, f"❌ Verification failed: {reason}")
+        await safe_edit(status_msg, f"{em.ERROR} Verification failed: {reason}")
         return
 
     pay_states.pop(user_id, None)
@@ -2469,17 +2526,17 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     new_balance = await db.get_credits(user_id)
 
     await alert(bot,
-        f"🪙 **Credits Purchased (Crypto)**\n\n"
-        f"👤 User: `{user_id}`\n"
-        f"🎁 Credits: +{plan['credits']}\n"
-        f"💵 Amount: {pstate['amount_usdt']} USDT\n"
-        f"💰 New balance: {new_balance}"
+        f"{em.COIN} **Credits Purchased (Crypto)**\n\n"
+        f"{em.USER} User: `{user_id}`\n"
+        f"{em.GIFT} Credits: +{plan['creditsf']}\n"
+        f"{em.DOLLAR} Amount: {pstate['amount_usdtf']} USDT\n"
+        f"{em.MONEY} New balance: {new_balance}"
     )
 
     await safe_edit(status_msg,
-        f"✅ **Deposit confirmed!**\n\n"
-        f"🎁 +{plan['credits']} credits added\n"
-        f"💰 New balance: **{new_balance}**",
+        f"{em.SUCCESS} **Deposit confirmed!**\n\n"
+        f"{em.GIFT} +{plan['creditsf']} credits added\n"
+        f"{em.MONEY} New balance: **{new_balance}**",
         reply_markup=back_kb("main_menu"),
     )
 
@@ -2489,10 +2546,10 @@ async def _handle_rz_custom_amount(message: Message, text: str):
     try:
         credits = int(text.strip())
         if credits < 10:
-            await message.reply("❌ Minimum amount is 10 credits. Please try again:")
+            await message.reply(f"{em.ERROR} Minimum amount is 10 credits. Please try again:")
             return
     except ValueError:
-        await message.reply("❌ Invalid number. Please enter a valid integer (minimum 10):")
+        await message.reply(f"{em.ERROR} Invalid number. Please enter a valid integer (minimum 10):")
         return
 
     auth_states.pop(user_id, None)
@@ -2500,20 +2557,20 @@ async def _handle_rz_custom_amount(message: Message, text: str):
     plan_key = f"custom_{credits}"
     plan = get_credit_plan(plan_key)
 
-    status_msg = await message.reply("⏳ Generating QR code...")
+    status_msg = await message.reply(f"{em.LOADING} Generating QR code...")
     qr = await asyncio.to_thread(
         payments.create_razorpay_qr, plan["label"], plan["amount_inr"], user_id,
     )
     if not qr:
         await safe_edit(status_msg,
-            "❌ Payment gateway error. Try later.",
+            f"{em.ERROR} Payment gateway error. Try later.",
             reply_markup=back_kb("buy_credits"),
         )
         return
 
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="buy_credits")],
+        [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
+        [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")],
     ])
 
     try:
@@ -2525,9 +2582,9 @@ async def _handle_rz_custom_amount(message: Message, text: str):
         user_id,
         photo=qr["image_url"],
         caption=(
-            f"📱 **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
-            f"🎁 You'll receive **{plan['credits']} credits**\n\n"
-            "⏱ Valid for 15 minutes."
+            f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
+            f"{em.GIFT} You'll receive **{plan['creditsf']} credits**\n\n"
+            f"{em.TIMER} Valid for 15 minutes."
         ),
         reply_markup=buttons,
     )
@@ -2547,10 +2604,10 @@ async def _handle_cr_custom_amount(message: Message, text: str):
     try:
         credits = int(text.strip())
         if credits < 10:
-            await message.reply("❌ Minimum amount is 10 credits. Please try again:")
+            await message.reply(f"{em.ERROR} Minimum amount is 10 credits. Please try again:")
             return
     except ValueError:
-        await message.reply("❌ Invalid number. Please enter a valid integer (minimum 10):")
+        await message.reply(f"{em.ERROR} Invalid number. Please enter a valid integer (minimum 10):")
         return
 
     auth_states.pop(user_id, None)
@@ -2562,10 +2619,10 @@ async def _handle_cr_custom_amount(message: Message, text: str):
         [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}")],
         [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}")],
         [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="cr_plans")],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans")],
     ]
     await message.reply(
-        f"🌐 **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
+        f"{em.GLOBE} **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -2576,10 +2633,10 @@ async def _handle_set_new_category_price(message: Message, text: str):
     try:
         price = int(text.strip())
         if price <= 0:
-            await message.reply("❌ Price must be a positive integer. Please try again:")
+            await message.reply(f"{em.ERROR} Price must be a positive integer. Please try again:")
             return
     except ValueError:
-        await message.reply("❌ Invalid price. Please enter a positive integer:")
+        await message.reply(f"{em.ERROR} Invalid price. Please enter a positive integer:")
         return
 
     cc = state["pending_cc"]
@@ -2600,8 +2657,8 @@ async def _handle_set_new_category_price(message: Message, text: str):
     auth_states.pop(user_id, None)
 
     await message.reply(
-        f"✅ **Category price set and number added successfully!**\n\n"
-        f"📱 `{phone}` — {flag} {name}\n"
-        f"💰 Price: **{price}** credits per OTP",
+        f"{em.SUCCESS} **Category price set and number added successfully!**\n\n"
+        f"{em.PHONE} `{phone}` — {flag} {name}\n"
+        f"{em.MONEY} Price: **{price}** credits per OTP",
         reply_markup=main_menu_kb(True),
     )
