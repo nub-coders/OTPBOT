@@ -183,12 +183,17 @@ async def payment_recovery_processor(bot):
 async def main():
     from bot import create_bot
     import clients
+    from config import TURNSTILE_SITE_KEY
+    import verification
 
     bot = create_bot()
     clients.set_bot(bot)
 
     await bot.start()
     log.info("Bot started.")
+
+    if TURNSTILE_SITE_KEY:
+        await verification.start_server()
 
     await clients.validate_sessions()
     await recover_orphaned_assignments(bot)

@@ -20,10 +20,11 @@ from pyrogram.errors import (
     MessageNotModified,
 )
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL
 import database as db
 import clients
 import payments
+import verification
 from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone
 import custom_emojis as em
 em.patch_pyrogram_for_custom_emojis()
@@ -88,6 +89,47 @@ async def alert(bot: Client, text: str):
                 await bot.send_message(admin_id, text)
             except Exception as e:
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
+
+
+VERIFICATION_ENABLED = bool(TURNSTILE_SITE_KEY and VERIFY_URL)
+
+
+def verified(func):
+    from functools import wraps
+    @wraps(func)
+    async def wrapper(client, update, *args, **kwargs):
+        if VERIFICATION_ENABLED:
+            tg_user = update.from_user
+            user_id = tg_user.id
+            if not await db.is_admin(user_id):
+                if not await db.get_user(user_id):
+                    role = "admin" if await db.admin_count() == 0 else "user"
+                    await db.create_user(user_id, tg_user.username, tg_user.first_name, role)
+                    if role == "admin":
+                        return await func(client, update, *args, **kwargs)
+                    uname = tg_user.username or tg_user.first_name or str(user_id)
+                    await alert(client,
+                        f"{em.USER} **New User Joined**\n\n"
+                        f"{em.ID_BADGE} ID: `{user_id}`\n"
+                        f"📛 Name: @{uname}"
+                    )
+                if not await db.is_verified(user_id):
+                    url = await verification.create_verification_link(user_id)
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.SHIELD} Verify", url=url)],
+                    ])
+                    text = (
+                        f"{em.SHIELD} **Verification Required**\n\n"
+                        "Complete a quick human verification to access the bot.\n"
+                        "Tap the button below to verify, then send /start again."
+                    )
+                    if isinstance(update, CallbackQuery):
+                        await safe_edit(update.message, text, reply_markup=kb)
+                    else:
+                        await update.reply(text, reply_markup=kb)
+                    return
+        return await func(client, update, *args, **kwargs)
+    return wrapper
 
 
 def create_bot() -> Client:
@@ -200,6 +242,7 @@ def paginate_buttons(items, page, cb_prefix, back_target):
 def _register_handlers(app: Client):
 
     @app.on_message(filters.command("start") & filters.private)
+    @verified
     async def cmd_start(_, message: Message):
         user_id = message.from_user.id
         user = await db.get_user(user_id)
@@ -238,6 +281,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^main_menu$"))
+    @verified
     async def cb_main_menu(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
         credits = await db.get_credits(cq.from_user.id)
@@ -248,6 +292,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^support$"))
+    @verified
     async def cb_support(_, cq: CallbackQuery):
         lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@f')})" for h in SUPPORT_HANDLES)
         await safe_edit(cq.message,
@@ -259,6 +304,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^admin_panel$"))
+    @verified
     async def cb_admin_panel(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -268,6 +314,7 @@ def _register_handlers(app: Client):
     # ── Add Number Flow ──
 
     @app.on_callback_query(filters.regex("^add_number$"))
+    @verified
     async def cb_add_number(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -284,6 +331,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^cancel_auth$"))
+    @verified
     async def cb_cancel_auth(_, cq: CallbackQuery):
         state = auth_states.pop(cq.from_user.id, None)
         if state and "client" in state:
@@ -298,6 +346,7 @@ def _register_handlers(app: Client):
     # ── Account Year Adjuster ──
 
     @app.on_callback_query(filters.regex("^ay_edit$"))
+    @verified
     async def cb_ay_edit(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") != "confirm_country":
@@ -320,6 +369,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^ay_adj:"))
+    @verified
     async def cb_ay_adj(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") != "confirm_country":
@@ -345,6 +395,7 @@ def _register_handlers(app: Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^ay_set$"))
+    @verified
     async def cb_ay_set(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") != "confirm_country":
@@ -367,6 +418,7 @@ def _register_handlers(app: Client):
     # ── Country confirmation ──
 
     @app.on_callback_query(filters.regex("^cc_yes$"))
+    @verified
     async def cb_cc_yes(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") != "confirm_country":
@@ -421,6 +473,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^cc_no$"))
+    @verified
     async def cb_cc_no(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") != "confirm_country":
@@ -438,6 +491,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^cc_pick:"))
+    @verified
     async def cb_cc_pick(_, cq: CallbackQuery):
         state = auth_states.get(cq.from_user.id)
         if not state or state.get("step") not in ("manual_country", "confirm_country"):
@@ -536,6 +590,7 @@ def _register_handlers(app: Client):
     # ── Country Pricing ──
 
     @app.on_callback_query(filters.regex(r"^country_pricing$|^pg_cp:\d+$"))
+    @verified
     async def cb_country_pricing(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -595,6 +650,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^setcprice:"))
+    @verified
     async def cb_setcprice(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -632,6 +688,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^editcat:"))
+    @verified
     async def cb_editcat(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -664,6 +721,7 @@ def _register_handlers(app: Client):
     # ── List Numbers (Admin) ──
 
     @app.on_callback_query(filters.regex(r"^list_numbers$|^pg_ln:\d+$"))
+    @verified
     async def cb_list_numbers(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -719,6 +777,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^rm:"))
+    @verified
     async def cb_remove_number(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -736,6 +795,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^confirm_rm:"))
+    @verified
     async def cb_confirm_remove(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -755,6 +815,7 @@ def _register_handlers(app: Client):
     # ── Per-number actions ──
 
     @app.on_callback_query(filters.regex(r"^num_actions:"))
+    @verified
     async def cb_num_actions(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -809,6 +870,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, info, reply_markup=InlineKeyboardMarkup(buttons))
 
     @app.on_callback_query(filters.regex(r"^relist:"))
+    @verified
     async def cb_relist(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -836,6 +898,7 @@ def _register_handlers(app: Client):
     # ── Sold Numbers ──
 
     @app.on_callback_query(filters.regex(r"^sold_list$|^pg_sl:\d+$"))
+    @verified
     async def cb_sold_list(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -872,6 +935,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^sold_detail:"))
+    @verified
     async def cb_sold_detail(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -986,6 +1050,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^editnum:"))
+    @verified
     async def cb_editnum(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1000,6 +1065,7 @@ def _register_handlers(app: Client):
         await _edit_category_view(cq.message, phone, session)
 
     @app.on_callback_query(filters.regex(r"^echg_yr:"))
+    @verified
     async def cb_echg_yr(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1023,6 +1089,7 @@ def _register_handlers(app: Client):
         await cq.answer(f"Year set to {new_year}")
 
     @app.on_callback_query(filters.regex(r"^echg_em:"))
+    @verified
     async def cb_echg_em(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1042,6 +1109,7 @@ def _register_handlers(app: Client):
         await cq.answer(f"Email toggled to {'Yes' if new_email else 'No'}")
 
     @app.on_callback_query(filters.regex(r"^echg_cc:"))
+    @verified
     async def cb_echg_cc(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1067,6 +1135,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^echg_ccpick:"))
+    @verified
     async def cb_echg_ccpick(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1092,6 +1161,7 @@ def _register_handlers(app: Client):
             await _edit_category_view(cq.message, phone, session, prefix=f"{em.SUCCESS} Country updated!\n\n")
 
     @app.on_callback_query(filters.regex(r"^verify:"))
+    @verified
     async def cb_verify(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1127,6 +1197,7 @@ def _register_handlers(app: Client):
             )
 
     @app.on_callback_query(filters.regex(r"^readd:"))
+    @verified
     async def cb_readd(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1143,6 +1214,7 @@ def _register_handlers(app: Client):
         await _handle_phone_direct(cq.from_user.id, phone, cq.message)
 
     @app.on_callback_query(filters.regex(r"^updpwd:"))
+    @verified
     async def cb_updpwd(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1207,6 +1279,7 @@ def _register_handlers(app: Client):
     # ── Users ──
 
     @app.on_callback_query(filters.regex(r"^users_list$|^pg_ul:\d+$"))
+    @verified
     async def cb_users_list(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1258,6 +1331,7 @@ def _register_handlers(app: Client):
     # ── Credits ──
 
     @app.on_callback_query(filters.regex("^add_credits$"))
+    @verified
     async def cb_add_credits(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1274,6 +1348,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.command("addcred") & filters.private)
+    @verified
     async def cmd_addcred(_, message: Message):
         if not await db.is_admin(message.from_user.id):
             await message.reply(f"{em.BLOCKED} Admin only.")
@@ -1339,6 +1414,7 @@ def _register_handlers(app: Client):
     # ── Broadcast ──
 
     @app.on_callback_query(filters.regex("^broadcast_help$"))
+    @verified
     async def cb_broadcast_help(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1353,6 +1429,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.command("broadcast") & filters.private)
+    @verified
     async def cmd_broadcast(_, message: Message):
         if not await db.is_admin(message.from_user.id):
             await message.reply(f"{em.BLOCKED} Admin only.")
@@ -1404,6 +1481,7 @@ def _register_handlers(app: Client):
     # ── Stats ──
 
     @app.on_callback_query(filters.regex("^stats$"))
+    @verified
     async def cb_stats(_, cq: CallbackQuery):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
@@ -1432,6 +1510,7 @@ def _register_handlers(app: Client):
     # ── Get Number (User) — Country-based ──
 
     @app.on_callback_query(filters.regex(r"^get_number$|^pg_gn:\d+$"))
+    @verified
     async def cb_get_number(_, cq: CallbackQuery):
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_gn:") else 0
 
@@ -1480,6 +1559,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^country:[A-Z]+$|^pg_cn:[A-Z]+:\d+$"))
+    @verified
     async def cb_country(_, cq: CallbackQuery):
         if cq.data.startswith("pg_cn:"):
             parts = cq.data.split(":")
@@ -1539,10 +1619,12 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^noop$"))
+    @verified
     async def cb_noop(_, cq: CallbackQuery):
         await cq.answer("This number is currently in use.", show_alert=True)
 
     @app.on_callback_query(filters.regex(r"^sel:"))
+    @verified
     async def cb_select_number(_, cq: CallbackQuery):
         phone = cq.data.split(":", 1)[1]
 
@@ -1653,6 +1735,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^release:"))
+    @verified
     async def cb_release(_, cq: CallbackQuery):
         phone = cq.data.split(":", 1)[1]
         req = clients.active_requests.get(phone)
@@ -1696,6 +1779,7 @@ def _register_handlers(app: Client):
     # ── OTP History ──
 
     @app.on_callback_query(filters.regex(r"^my_history$|^pg_mh:\d+$"))
+    @verified
     async def cb_history(_, cq: CallbackQuery):
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_mh:") else 0
 
@@ -1739,6 +1823,7 @@ def _register_handlers(app: Client):
     # ── Buy Credits ──
 
     @app.on_callback_query(filters.regex("^buy_credits$"))
+    @verified
     async def cb_buy_credits(_, cq: CallbackQuery):
         auth_states.pop(cq.from_user.id, None)
         credits = await db.get_credits(cq.from_user.id)
@@ -1759,6 +1844,7 @@ def _register_handlers(app: Client):
     # ── Razorpay Plans ──
 
     @app.on_callback_query(filters.regex("^rz_plans$"))
+    @verified
     async def cb_rz_plans(_, cq: CallbackQuery):
         buttons = []
         for key, plan in CREDIT_PLANS.items():
@@ -1773,6 +1859,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^rz_pay:"))
+    @verified
     async def cb_rz_pay(_, cq: CallbackQuery):
         plan_key = cq.data.split(":", 1)[1]
         plan = get_credit_plan(plan_key)
@@ -1820,6 +1907,7 @@ def _register_handlers(app: Client):
         ))
 
     @app.on_callback_query(filters.regex(r"^rz_check:"))
+    @verified
     async def cb_rz_check(_, cq: CallbackQuery):
         parts = cq.data.split(":")
         qr_id, plan_key = parts[1], parts[2]
@@ -1840,6 +1928,7 @@ def _register_handlers(app: Client):
     # ── Crypto Plans ──
 
     @app.on_callback_query(filters.regex("^cr_plans$"))
+    @verified
     async def cb_cr_plans(_, cq: CallbackQuery):
         buttons = []
         for key, plan in CRYPTO_PLANS.items():
@@ -1855,6 +1944,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^cr_net:"))
+    @verified
     async def cb_cr_net(_, cq: CallbackQuery):
         plan_key = cq.data.split(":", 1)[1]
         buttons = [
@@ -1869,6 +1959,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex(r"^cr_addr:"))
+    @verified
     async def cb_cr_addr(_, cq: CallbackQuery):
         parts = cq.data.split(":")
         network, plan_key = parts[1], parts[2]
@@ -1913,11 +2004,13 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^cancel_pay$"))
+    @verified
     async def cb_cancel_pay(_, cq: CallbackQuery):
         pay_states.pop(cq.from_user.id, None)
         await safe_edit(cq.message, f"{em.ERROR} Payment cancelled.", reply_markup=back_kb("main_menu"))
 
     @app.on_callback_query(filters.regex("^rz_custom$"))
+    @verified
     async def cb_rz_custom(_, cq: CallbackQuery):
         auth_states[cq.from_user.id] = {"step": "rz_custom_amount"}
         await safe_edit(cq.message,
@@ -1928,6 +2021,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^cr_custom$"))
+    @verified
     async def cb_cr_custom(_, cq: CallbackQuery):
         auth_states[cq.from_user.id] = {"step": "cr_custom_amount"}
         await safe_edit(cq.message,
@@ -1967,6 +2061,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.command("help") & filters.private)
+    @verified
     async def cmd_help(_, message: Message):
         is_adm = await db.is_admin(message.from_user.id)
         await message.reply(
@@ -1975,6 +2070,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_callback_query(filters.regex("^help$"))
+    @verified
     async def cb_help(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
         await safe_edit(
@@ -1984,6 +2080,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.command("cancel") & filters.private)
+    @verified
     async def cmd_cancel(_, message: Message):
         state = auth_states.pop(message.from_user.id, None)
         if state and "client" in state:

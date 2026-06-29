@@ -28,6 +28,11 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 USDT_TO_INR = float(os.getenv("USDT_TO_INR", "95"))
 
+TURNSTILE_SITE_KEY = os.getenv("TURNSTILE_SITE_KEY", "")
+TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
+VERIFY_URL = os.getenv("VERIFY_URL", "")
+VERIFY_PORT = int(os.getenv("VERIFY_PORT", "8888"))
+
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},
     "25": {"credits": 25, "amount_inr": 2500, "label": "25 Credits — ₹25"},
