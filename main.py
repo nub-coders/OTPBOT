@@ -99,6 +99,7 @@ async def recover_pending_payments(bot):
 async def refund_processor(bot):
     """Background task that processes pending refunds every 60 seconds."""
     import database as db
+    from bot import alert
     while True:
         try:
             due = await db.get_due_refunds()
@@ -107,13 +108,22 @@ async def refund_processor(bot):
                 amount = refund["amount"]
                 await db.add_credits(user_id, amount)
                 await db.mark_refund_done(refund["_id"])
+                new_balance = await db.get_credits(user_id)
                 log.info("Refund processed: %d credits to user %d", amount, user_id)
+                phone = refund.get("phone_number", "N/A")
+                await alert(bot,
+                    f"💰 **Refund Issued**\n\n"
+                    f"👤 User: `{user_id}`\n"
+                    f"📱 Number: `{phone}`\n"
+                    f"➕ Credits: +{amount}\n"
+                    f"💰 New balance: {new_balance}"
+                )
                 try:
                     await bot.send_message(
                         user_id,
                         f"💰 **Credits refunded!**\n\n"
                         f"➕ **{amount}** credits returned to your account.\n"
-                        f"💰 New balance: **{await db.get_credits(user_id)}**",
+                        f"💰 New balance: **{new_balance}**",
                     )
                 except Exception:
                     pass

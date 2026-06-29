@@ -109,6 +109,7 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 Buy Credits", callback_data="buy_credits")],
         [
             InlineKeyboardButton("📞 Support", callback_data="support"),
+            InlineKeyboardButton("❓ Help", callback_data="help"),
         ],
     ]
     if UPDATES_CHANNEL:
@@ -204,6 +205,13 @@ def _register_handlers(app: Client):
                 message.from_user.first_name,
                 role,
             )
+            if role != "admin":
+                uname = message.from_user.username or message.from_user.first_name or str(user_id)
+                await alert(app,
+                    f"👤 **New User Joined**\n\n"
+                    f"🆔 ID: `{user_id}`\n"
+                    f"📛 Name: @{uname}"
+                )
             if role == "admin":
                 await message.reply(
                     "👑 **Welcome, Admin!**\n\n"
@@ -389,6 +397,14 @@ def _register_handlers(app: Client):
         await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
         auth_states.pop(cq.from_user.id, None)
 
+        await alert(app,
+            f"➕ **Number Added**\n\n"
+            f"🛡 Admin: `{cq.from_user.id}`\n"
+            f"📱 Number: `{phone}`\n"
+            f"{flag} Country: {name}\n"
+            f"💰 Price: {price} credits"
+        )
+
         await safe_edit(cq.message,
             f"✅ **Number added successfully!**\n\n"
             f"📱 `{phone}` — {flag} {name}\n"
@@ -449,6 +465,14 @@ def _register_handlers(app: Client):
                               email_added=email_added)
         await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
         auth_states.pop(cq.from_user.id, None)
+
+        await alert(app,
+            f"➕ **Number Added**\n\n"
+            f"🛡 Admin: `{cq.from_user.id}`\n"
+            f"📱 Number: `{phone}`\n"
+            f"{flag} Country: {name}\n"
+            f"💰 Price: {price} credits"
+        )
 
         await safe_edit(cq.message,
             f"✅ **Number added successfully!**\n\n"
@@ -643,59 +667,42 @@ def _register_handlers(app: Client):
             )
             return
 
-        prices = await db.get_all_country_prices()
         by_country = {}
         for s in sessions:
             cc = s.get("country_code", "XX")
             by_country.setdefault(cc, []).append(s)
 
-        all_entries = []
+        country_lines = []
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
-            price = prices.get(cc, 1)
-            header = f"\n{flag} **{name}** — {price} cr/OTP"
+            count = len(by_country[cc])
+            country_lines.append(f"{flag} {name}: **{count}**")
+
+        summary = (
+            f"📋 **Registered Numbers:** {len(sessions)} total\n\n"
+            + "\n".join(country_lines)
+        )
+
+        all_buttons = []
+        for cc in sorted(by_country.keys()):
+            flag = get_country_flag(cc)
             for s in by_country[cc]:
                 phone = s["phone_number"]
                 status_icon = {"active": "🟢", "sold": "🔴", "error": "⚠️"}.get(s.get("status"), "⚪")
-                assigned = clients.get_request_user(phone)
-                assigned_text = f" → user `{assigned}`" if assigned else ""
-                error_text = f"\n  └ ❗ {s['last_error'][:80]}" if s.get("last_error") else ""
                 acc_year = s.get("account_year")
-                age_text = f" — 📅 ~{acc_year}" if acc_year else ""
-                line = f"  {status_icon} `{phone}`{age_text}{assigned_text}{error_text}"
-                btn = [InlineKeyboardButton(f"🔍 {phone}", callback_data=f"num_actions:{phone}")]
-                all_entries.append({"header": header, "line": line, "btn": btn})
-                header = None
+                year_str = f" ~{acc_year}" if acc_year else ""
+                p = await db.get_session_price(s)
+                all_buttons.append([InlineKeyboardButton(
+                    f"{status_icon} {flag} {phone}{year_str} — {p} cr",
+                    callback_data=f"num_actions:{phone}",
+                )])
 
-        start = page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        page_entries = all_entries[start:end]
-
-        lines = ["📋 **Registered Numbers:**\n"]
-        page_btns = []
-        seen_headers = set()
-        for e in page_entries:
-            if e["header"] and e["header"] not in seen_headers:
-                lines.append(e["header"])
-                seen_headers.add(e["header"])
-            lines.append(e["line"])
-            page_btns.append(e["btn"])
-
-        total_pages = (len(all_entries) + PAGE_SIZE - 1) // PAGE_SIZE
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_ln:{page - 1}"))
-        if end < len(all_entries):
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_ln:{page + 1}"))
-        if nav:
-            page_btns.append(nav)
-        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-        page_btns.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_ln", "admin_panel")
 
         await safe_edit(cq.message,
-            "\n".join(lines) + page_label,
-            reply_markup=InlineKeyboardMarkup(page_btns),
+            summary + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
     @app.on_callback_query(filters.regex(r"^rm:"))
@@ -723,6 +730,11 @@ def _register_handlers(app: Client):
 
         phone = cq.data.split(":", 1)[1]
         await clients.remove_client(phone)
+        await alert(app,
+            f"🗑 **Number Removed**\n\n"
+            f"🛡 Admin: `{cq.from_user.id}`\n"
+            f"📱 Number: `{phone}`"
+        )
         await safe_edit(cq.message,
             f"✅ `{phone}` removed.", reply_markup=back_kb("admin_panel")
         )
@@ -1192,6 +1204,14 @@ def _register_handlers(app: Client):
         new_balance = await db.get_credits(target_id)
         name = target.get("first_name") or target.get("username") or str(target_id)
 
+        await alert(app,
+            f"👑 **Admin Added Credits**\n\n"
+            f"🛡 Admin: `{message.from_user.id}`\n"
+            f"👤 Target: `{target_id}` ({name})\n"
+            f"➕ Credits: +{amount}\n"
+            f"💰 New balance: {new_balance}"
+        )
+
         await message.reply(
             f"✅ **Credits added!**\n\n"
             f"👤 User: **{name}**\n"
@@ -1484,8 +1504,16 @@ def _register_handlers(app: Client):
 
         clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT, price)
 
+        uname = cq.from_user.username or cq.from_user.first_name or str(cq.from_user.id)
         flag = get_country_flag(cc)
         name = get_country_name(cc)
+        await alert(app,
+            f"📱 **Number Purchased**\n\n"
+            f"👤 User: `{cq.from_user.id}` (@{uname})\n"
+            f"📱 Number: `{phone}`\n"
+            f"{flag} Country: {name}\n"
+            f"💰 Price: **{price}** credits"
+        )
         credits = await db.get_credits(cq.from_user.id)
         credit_line = f"\n💰 Credits: {credits}"
         pwd = session.get("password", "")
@@ -1788,26 +1816,48 @@ def _register_handlers(app: Client):
 
     # ── Help / Cancel ──
 
+    def _build_help_text(is_admin: bool) -> str:
+        admin_section = (
+            "\n\n⚙️ **Admin Commands:**\n"
+            "  /addcred `<userid>` `<credits>` — Add credits to a user\n"
+            "  /broadcast `<message>` — Broadcast to all users\n"
+            "  /broadcast `-name` `<message>` — Broadcast with your name"
+        ) if is_admin else ""
+        return (
+            "❓ **Help — OTP Bot**\n\n"
+            "📌 **How it works:**\n"
+            "  1. Buy credits via UPI or Crypto\n"
+            "  2. Tap **Get Number** and select a country\n"
+            "  3. Pick an available number — 1 credit is deducted\n"
+            "  4. OTP messages arriving on that number are forwarded to you\n"
+            "  5. The number auto-releases after the timeout\n\n"
+            "💡 **Features:**\n"
+            "  • 📱 **Get Number** — Rent a number to receive OTPs\n"
+            "  • 📜 **My History** — View your past sessions\n"
+            "  • 💳 **Buy Credits** — Top up via UPI or USDT\n"
+            "  • 📞 **Support** — Contact our support agents\n\n"
+            "🔧 **Commands:**\n"
+            "  /start — Main menu\n"
+            "  /help — This help page\n"
+            "  /cancel — Cancel current operation"
+            f"{admin_section}"
+        )
+
     @app.on_message(filters.command("help") & filters.private)
     async def cmd_help(_, message: Message):
         is_adm = await db.is_admin(message.from_user.id)
-        admin_section = (
-            "\n**Admin Commands:**\n"
-            "/addcred <userid> <credits> — Add credits to a user\n"
-            "/broadcast <message> — Broadcast to all users (no name)\n"
-            "/broadcast -name <message> — Broadcast with your name\n"
-        ) if is_adm else ""
         await message.reply(
-            "**OTP Bot Help**\n\n"
-            "/start — Main menu\n"
-            "/help — This message\n"
-            "/cancel — Cancel current operation\n\n"
-            "**How it works:**\n"
-            "1. Admin adds Telegram numbers via the bot\n"
-            "2. Select a country, then pick a number\n"
-            "3. OTP messages arriving on that number are forwarded to you\n"
-            "4. The number auto-releases after timeout"
-            f"{admin_section}",
+            _build_help_text(is_adm),
+            reply_markup=back_kb(),
+        )
+
+    @app.on_callback_query(filters.regex("^help$"))
+    async def cb_help(_, cq: CallbackQuery):
+        is_adm = await db.is_admin(cq.from_user.id)
+        await safe_edit(
+            cq.message,
+            _build_help_text(is_adm),
+            reply_markup=back_kb(),
         )
 
     @app.on_message(filters.command("cancel") & filters.private)
@@ -1928,7 +1978,8 @@ async def _handle_code(message: Message, code: str):
         await safe_edit(status_msg,
             f"✅ Code verified for `{phone}`\n\n"
             f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
-            f"📅 Account year: **{acc_year or 'Unknown'}**\n\n"
+            f"📅 Account year: **{acc_year or 'Unknown'}**\n"
+            f"📧 Email added: **{'Yes' if has_email else 'No'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
@@ -1990,7 +2041,8 @@ async def _handle_password(message: Message, password: str):
         await safe_edit(status_msg,
             f"✅ Password accepted for `{phone}`\n\n"
             f"🌍 Detected country: {cflag} **{cname}** ({cc})\n"
-            f"📅 Account year: **{acc_year or 'Unknown'}**\n\n"
+            f"📅 Account year: **{acc_year or 'Unknown'}**\n"
+            f"📧 Email added: **{'Yes' if has_email else 'No'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
@@ -2105,9 +2157,11 @@ async def _handle_manual_country(message: Message, text: str):
         state["country_code"] = cc
         state["step"] = "confirm_country"
         year = state.get("account_year")
+        email_added = state.get("email_added", False)
         await message.reply(
             f"🌍 Found: {flag} **{name}** ({cc})\n"
-            f"📅 Account year: **{year or 'Unknown'}**\n\n"
+            f"📅 Account year: **{year or 'Unknown'}**\n"
+            f"📧 Email added: **{'Yes' if email_added else 'No'}**\n\n"
             f"Confirm this country for `{state['phone']}`?",
             reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
         )
@@ -2288,6 +2342,13 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             await db.add_credits(user_id, plan["credits"])
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
             new_balance = await db.get_credits(user_id)
+            await alert(bot,
+                f"💳 **Credits Purchased (Razorpay)**\n\n"
+                f"👤 User: `{user_id}`\n"
+                f"🎁 Credits: +{plan['credits']}\n"
+                f"💵 Amount: ₹{plan['amount_inr'] // 100}\n"
+                f"💰 New balance: {new_balance}"
+            )
             try:
                 await qr_msg.delete()
             except Exception:
@@ -2355,6 +2416,14 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     await db.add_credits(user_id, plan["credits"])
     await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
     new_balance = await db.get_credits(user_id)
+
+    await alert(bot,
+        f"🪙 **Credits Purchased (Crypto)**\n\n"
+        f"👤 User: `{user_id}`\n"
+        f"🎁 Credits: +{plan['credits']}\n"
+        f"💵 Amount: {pstate['amount_usdt']} USDT\n"
+        f"💰 New balance: {new_balance}"
+    )
 
     await safe_edit(status_msg,
         f"✅ **Deposit confirmed!**\n\n"
