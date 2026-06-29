@@ -408,6 +408,8 @@ def _register_handlers(app: Client):
             f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
+            f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+            f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
 
@@ -477,6 +479,8 @@ def _register_handlers(app: Client):
             f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
+            f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+            f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
 
@@ -2655,6 +2659,16 @@ async def _handle_set_new_category_price(message: Message, text: str):
                           email_added=email_added)
     await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
     auth_states.pop(user_id, None)
+
+    await alert(bot,
+        f"{em.ADD} **Number Added**\n\n"
+        f"{em.SHIELD} Admin: `{user_id}`\n"
+        f"{em.PHONE} Number: `{phone}`\n"
+        f"{flag} Country: {name}\n"
+        f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+        f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
+        f"{em.MONEY} Price: {price} credits"
+    )
 
     await message.reply(
         f"{em.SUCCESS} **Category price set and number added successfully!**\n\n"
