@@ -127,10 +127,7 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("➕ Add Number", callback_data="add_number"),
             InlineKeyboardButton("📋 List Numbers", callback_data="list_numbers"),
         ],
-        [
-            InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing"),
-            InlineKeyboardButton("👥 Users", callback_data="users_list"),
-        ],
+        [InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing")],
         [
             InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
             InlineKeyboardButton("📊 Stats", callback_data="stats"),
@@ -1551,6 +1548,14 @@ def _register_handlers(app: Client):
         otp_received = req.get("otp_received", False)
         price = req.get("price", 0)
         user_id = req["user_id"]
+
+        if otp_received and not await db.is_admin(cq.from_user.id):
+            await safe_edit(cq.message,
+                f"❌ Cannot release `{mask_phone(phone)}` — OTP was already forwarded.\n\n"
+                "Number is marked as sold. No refund available.",
+                reply_markup=back_kb("main_menu"),
+            )
+            return
 
         clients.release_number(phone)
         await clients.stop_session(phone)
