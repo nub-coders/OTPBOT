@@ -157,7 +157,8 @@ async def payment_recovery_processor(bot):
                 )
 
                 if status == "paid":
-                    await db.mark_pending_payment_done(qr_id)
+                    if not await db.mark_pending_payment_done(qr_id):
+                        continue
                     await db.add_credits(user_id, plan["credits"])
                     await db.save_payment(user_id, "razorpay", plan_key, amount_inr / 100, "INR", qr_id)
                     new_balance = await db.get_credits(user_id)

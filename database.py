@@ -304,11 +304,13 @@ async def get_pending_payments():
     return await db.pending_payments.find({"status": "pending"}).to_list(None)
 
 
-async def mark_pending_payment_done(qr_id: str):
-    await db.pending_payments.update_one(
-        {"qr_id": qr_id},
+async def mark_pending_payment_done(qr_id: str) -> bool:
+    """Atomically mark a pending payment as done. Returns True only if this call was the one that flipped it."""
+    result = await db.pending_payments.find_one_and_update(
+        {"qr_id": qr_id, "status": "pending"},
         {"$set": {"status": "done", "paid_at": datetime.now(timezone.utc)}},
     )
+    return result is not None
 
 
 async def mark_pending_payment_expired(qr_id: str):
