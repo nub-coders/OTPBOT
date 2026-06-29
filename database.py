@@ -163,11 +163,20 @@ async def remove_session(phone_number: str):
     await db.sessions.delete_one({"phone_number": phone_number})
 
 
-async def mark_session_sold(phone_number: str, sold_to: int):
+async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0):
     await db.sessions.update_one(
         {"phone_number": phone_number},
-        {"$set": {"status": "sold", "sold_to": sold_to}},
+        {"$set": {
+            "status": "sold",
+            "sold_to": sold_to,
+            "sold_at": datetime.now(timezone.utc),
+            "sold_price": price,
+        }},
     )
+
+
+async def get_sold_sessions():
+    return await db.sessions.find({"status": "sold"}).sort("sold_at", -1).to_list(None)
 
 
 async def set_session_password(phone_number: str, password: str):

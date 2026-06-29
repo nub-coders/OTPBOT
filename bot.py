@@ -127,7 +127,10 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("➕ Add Number", callback_data="add_number"),
             InlineKeyboardButton("📋 List Numbers", callback_data="list_numbers"),
         ],
-        [InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing")],
+        [
+            InlineKeyboardButton("💰 Country Pricing", callback_data="country_pricing"),
+            InlineKeyboardButton("🔴 Sold", callback_data="sold_list"),
+        ],
         [
             InlineKeyboardButton("💰 Add Credits", callback_data="add_credits"),
             InlineKeyboardButton("📊 Stats", callback_data="stats"),
@@ -656,7 +659,7 @@ def _register_handlers(app: Client):
 
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ln:") else 0
 
-        sessions = await db.get_all_sessions()
+        sessions = [s for s in await db.get_all_sessions() if s.get("status") != "sold"]
         if not sessions:
             await safe_edit(cq.message,
                 "📋 **No numbers added yet.**",
@@ -813,6 +816,102 @@ def _register_handlers(app: Client):
             f"✅ `{phone}` ({flag} {name}) is now **active** and available for sale.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data=f"num_actions:{phone}")],
+            ]),
+        )
+
+    # ── Sold Numbers ──
+
+    @app.on_callback_query(filters.regex(r"^sold_list$|^pg_sl:\d+$"))
+    async def cb_sold_list(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_sl:") else 0
+
+        sold = await db.get_sold_sessions()
+        if not sold:
+            await safe_edit(cq.message,
+                "🔴 **No sold numbers yet.**",
+                reply_markup=back_kb("admin_panel"),
+            )
+            return
+
+        all_buttons = []
+        for s in sold:
+            phone = s["phone_number"]
+            cc = s.get("country_code", "XX")
+            flag = get_country_flag(cc)
+            sold_price = s.get("sold_price", 0)
+            acc_year = s.get("account_year")
+            year_str = f" ~{acc_year}" if acc_year else ""
+            all_buttons.append([InlineKeyboardButton(
+                f"🔴 {flag} {phone}{year_str} — {sold_price} cr",
+                callback_data=f"sold_detail:{phone}",
+            )])
+
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_sl", "admin_panel")
+
+        await safe_edit(cq.message,
+            f"🔴 **Sold Numbers:** {len(sold)} total" + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^sold_detail:"))
+    async def cb_sold_detail(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer("⛔ Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        cc = session.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        acc_year = session.get("account_year")
+        email_added = session.get("email_added", False)
+        sold_to = session.get("sold_to")
+        sold_at = session.get("sold_at")
+        sold_price = session.get("sold_price", 0)
+
+        buyer_line = ""
+        if sold_to:
+            buyer = await db.get_user(sold_to)
+            if buyer:
+                bname = buyer.get("first_name") or buyer.get("username") or str(sold_to)
+                buyer_line = f"👤 **Buyer:** {bname} (`{sold_to}`)\n"
+            else:
+                buyer_line = f"👤 **Buyer ID:** `{sold_to}`\n"
+
+        sold_time = ""
+        if sold_at:
+            sold_time = f"🕐 **Sold At:** {sold_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+
+        age_line = f"📅 **Account Year:** ~{acc_year}\n" if acc_year else ""
+        email_line = f"📧 **Email Added:** {'Yes' if email_added else 'No'}\n"
+
+        info = (
+            f"🔴 **Sold Number**\n\n"
+            f"📱 **Number:** `{phone}`\n"
+            f"{flag} **Country:** {name} ({cc})\n"
+            f"💰 **Price Paid:** {sold_price} credits\n"
+            f"{buyer_line}"
+            f"{sold_time}"
+            f"{age_line}"
+            f"{email_line}"
+        )
+
+        await safe_edit(cq.message, info,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔍 Verify", callback_data=f"verify:{phone}"),
+                    InlineKeyboardButton("🔄 Re-list for Sale", callback_data=f"relist:{phone}"),
+                ],
+                [InlineKeyboardButton("🔙 Back", callback_data="sold_list")],
             ]),
         )
 
@@ -1091,60 +1190,6 @@ def _register_handlers(app: Client):
                 ]),
             )
 
-    # ── Users ──
-
-    @app.on_callback_query(filters.regex(r"^users_list$|^pg_ul:\d+$"))
-    async def cb_users_list(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer("⛔ Admin only.", show_alert=True)
-            return
-
-        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ul:") else 0
-
-        users = await db.get_all_users()
-        if not users:
-            await safe_edit(cq.message,
-                "👥 **No users yet.**", reply_markup=back_kb("admin_panel")
-            )
-            return
-
-        all_lines = []
-        all_buttons = []
-        for u in users:
-            role_icon = "👑" if u["role"] == "admin" else "👤"
-            name = u.get("first_name") or u.get("username") or str(u["telegram_id"])
-            credits = u.get("credits", 0)
-            all_lines.append(f"{role_icon} {name} — `{u['telegram_id']}` — 💰 {credits}")
-            if u["role"] != "admin":
-                all_buttons.append([
-                    InlineKeyboardButton(
-                        f"💰 Add credits: {name}",
-                        callback_data=f"cr:{u['telegram_id']}",
-                    )
-                ])
-            else:
-                all_buttons.append(None)
-
-        page_lines = all_lines[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
-        page_raw = all_buttons[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
-        page_btns = [b for b in page_raw if b is not None]
-
-        total_pages = (len(all_lines) + PAGE_SIZE - 1) // PAGE_SIZE
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_ul:{page - 1}"))
-        if (page + 1) * PAGE_SIZE < len(all_lines):
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"pg_ul:{page + 1}"))
-        if nav:
-            page_btns.append(nav)
-        page_label = f"\n\n📄 Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-        page_btns.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
-
-        await safe_edit(cq.message,
-            "👥 **Users:**\n\n" + "\n".join(page_lines) + page_label,
-            reply_markup=InlineKeyboardMarkup(page_btns),
-        )
-
     # ── Credits ──
 
     @app.on_callback_query(filters.regex("^add_credits$"))
@@ -1159,7 +1204,7 @@ def _register_handlers(app: Client):
             "`/addcred <userid> <credits>`\n\n"
             "**Example:**\n"
             "`/addcred 123456789 50`\n\n"
-            "You can find user IDs in the **Users** section.",
+            "You can find user IDs in the **Stats** section.",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -1561,7 +1606,7 @@ def _register_handlers(app: Client):
         await clients.stop_session(phone)
 
         if otp_received:
-            await db.mark_session_sold(phone, user_id)
+            await db.mark_session_sold(phone, user_id, price)
             await safe_edit(cq.message,
                 f"🔓 `{mask_phone(phone)}` released.",
                 reply_markup=back_kb("main_menu"),
