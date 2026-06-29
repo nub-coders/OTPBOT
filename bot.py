@@ -20,7 +20,7 @@ from pyrogram.errors import (
     MessageNotModified,
 )
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS
 import database as db
 import clients
 import payments
@@ -104,7 +104,17 @@ def verified(func):
             if not await db.is_admin(user_id):
                 if not await db.get_user(user_id):
                     role = "admin" if await db.admin_count() == 0 else "user"
-                    await db.create_user(user_id, tg_user.username, tg_user.first_name, role)
+                    referrer_id = None
+                    if isinstance(update, Message) and update.text:
+                        parts = update.text.split(None, 1)
+                        if len(parts) > 1 and parts[1].startswith("ref_"):
+                            try:
+                                ref_id = int(parts[1][4:])
+                                if ref_id != user_id:
+                                    referrer_id = ref_id
+                            except ValueError:
+                                pass
+                    await db.create_user(user_id, tg_user.username, tg_user.first_name, role, referred_by=referrer_id)
                     if role == "admin":
                         return await func(client, update, *args, **kwargs)
                     uname = tg_user.username or tg_user.first_name or str(user_id)
@@ -154,6 +164,7 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.DEFAULT),
         ],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
+        [InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.DEFAULT)],
         [
             InlineKeyboardButton(f"{em.PHONE} Support", callback_data="support", style=S.DEFAULT),
             InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
@@ -245,6 +256,17 @@ def _register_handlers(app: Client):
     @verified
     async def cmd_start(_, message: Message):
         user_id = message.from_user.id
+
+        referrer_id = None
+        args = message.text.split(None, 1)
+        if len(args) > 1 and args[1].startswith("ref_"):
+            try:
+                ref_id = int(args[1][4:])
+                if ref_id != user_id:
+                    referrer_id = ref_id
+            except ValueError:
+                pass
+
         user = await db.get_user(user_id)
         if not user:
             role = "admin" if await db.admin_count() == 0 else "user"
@@ -253,18 +275,21 @@ def _register_handlers(app: Client):
                 message.from_user.username,
                 message.from_user.first_name,
                 role,
+                referred_by=referrer_id,
             )
             if role != "admin":
                 uname = message.from_user.username or message.from_user.first_name or str(user_id)
+                ref_line = f"\n{em.LINK} Referred by: `{referrer_id}`" if referrer_id else ""
                 await alert(app,
                     f"{em.USER} **New User Joined**\n\n"
                     f"{em.ID_BADGE} ID: `{user_id}`\n"
-                    f"📛 Name: @{uname}"
+                    f"📛 Name: @{uname}{ref_line}"
                 )
+
             if role == "admin":
                 await message.reply(
                     f"{em.OWNER} **Welcome, Admin!**\n\n"
-                    "You are the first user — youf've been set as admin.\n"
+                    "You are the first user — you've been set as admin.\n"
                     "Use the panel below to manage numbers and users.",
                     reply_markup=main_menu_kb(True),
                 )
@@ -300,6 +325,25 @@ def _register_handlers(app: Client):
             f"Having issues? Contact any of our support agents:\n\n"
             f"{lines}\n\n"
             "We're here to help with purchases, login issues, or any questions.",
+            reply_markup=back_kb(),
+        )
+
+    @app.on_callback_query(filters.regex("^referral$"))
+    @verified
+    async def cb_referral(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        bot_me = await app.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{user_id}"
+        ref_count = await db.get_referral_count(user_id)
+        ref_earned = await db.get_referral_earned(user_id)
+
+        await safe_edit(cq.message,
+            f"{em.GIFT} **Refer & Earn**\n\n"
+            f"Share your referral link and earn **{REFERRAL_BONUS} credits** "
+            f"when your friend makes their first purchase!\n\n"
+            f"{em.LINK} **Your link:**\n`{ref_link}`\n\n"
+            f"{em.USERS} Referrals: **{ref_count}**\n"
+            f"{em.MONEY} Total earned: **{ref_earned}** credits",
             reply_markup=back_kb(),
         )
 
@@ -1994,7 +2038,7 @@ def _register_handlers(app: Client):
             + (f"Memo/Tag: `{tag}`\n" if tag else "") +
             f"\nAfter sending, **reply with your TX hash** here.\n"
             f"Type `cancel` to abort.\n\n"
-            f"{em.GIFT} You'll receive **{plan['creditsf']} credits**"
+            f"{em.GIFT} You'll receive **{plan['credits']} credits**"
         )
         await safe_edit(cq.message,
             text,
@@ -2566,8 +2610,8 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             await alert(bot,
                 f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
                 f"{em.USER} User: `{user_id}`\n"
-                f"{em.GIFT} Credits: +{plan['creditsf']}\n"
-                f"{em.DOLLAR} Amount: ₹{plan['amount_infr'] // 100}\n"
+                f"{em.GIFT} Credits: +{plan['credits']}\n"
+                f"{em.DOLLAR} Amount: ₹{plan['amount_inr'] // 100}\n"
                 f"{em.MONEY} New balance: {new_balance}"
             )
             try:
@@ -2577,7 +2621,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             await bot.send_message(
                 user_id,
                 f"{em.SUCCESS} **Payment received!**\n\n"
-                f"{em.GIFT} +{plan['creditsf']} credits added\n"
+                f"{em.GIFT} +{plan['credits']} credits added\n"
                 f"{em.MONEY} New balance: **{new_balance}**",
                 reply_markup=back_kb("main_menu"),
             )
@@ -2641,14 +2685,14 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     await alert(bot,
         f"{em.COIN} **Credits Purchased (Crypto)**\n\n"
         f"{em.USER} User: `{user_id}`\n"
-        f"{em.GIFT} Credits: +{plan['creditsf']}\n"
-        f"{em.DOLLAR} Amount: {pstate['amount_usdtf']} USDT\n"
+        f"{em.GIFT} Credits: +{plan['credits']}\n"
+        f"{em.DOLLAR} Amount: {pstate['amount_usdt']} USDT\n"
         f"{em.MONEY} New balance: {new_balance}"
     )
 
     await safe_edit(status_msg,
         f"{em.SUCCESS} **Deposit confirmed!**\n\n"
-        f"{em.GIFT} +{plan['creditsf']} credits added\n"
+        f"{em.GIFT} +{plan['credits']} credits added\n"
         f"{em.MONEY} New balance: **{new_balance}**",
         reply_markup=back_kb("main_menu"),
     )
@@ -2696,7 +2740,7 @@ async def _handle_rz_custom_amount(message: Message, text: str):
         photo=qr["image_url"],
         caption=(
             f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
-            f"{em.GIFT} You'll receive **{plan['creditsf']} credits**\n\n"
+            f"{em.GIFT} You'll receive **{plan['credits']} credits**\n\n"
             f"{em.TIMER} Valid for 15 minutes."
         ),
         reply_markup=buttons,

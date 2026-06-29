@@ -3,7 +3,7 @@ import logging
 from aiohttp import web
 import aiohttp
 import database as db
-from config import TURNSTILE_SECRET_KEY, TURNSTILE_SITE_KEY, VERIFY_PORT, VERIFY_URL
+from config import TURNSTILE_SECRET_KEY, TURNSTILE_SITE_KEY, VERIFY_PORT, VERIFY_URL, REFERRAL_BONUS
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +149,30 @@ async def handle_verify(request):
 
     await db.mark_verified(uid)
     log.info("User %d passed Turnstile verification", uid)
+
+    user = await db.get_user(uid)
+    if user and not await db.is_referral_rewarded(uid):
+        referrer_id = user.get("referred_by")
+        if referrer_id and await db.get_user(referrer_id):
+            await db.mark_referral_rewarded(uid)
+            if REFERRAL_BONUS > 0:
+                await db.add_referral_earning(referrer_id, REFERRAL_BONUS)
+                log.info("Referral reward: %d credits to user %d for referring %d", REFERRAL_BONUS, referrer_id, uid)
+                try:
+                    from bot import bot
+                    import custom_emojis as em
+                    uname = user.get("first_name") or user.get("username") or str(uid)
+                    new_balance = await db.get_credits(referrer_id)
+                    await bot.send_message(
+                        referrer_id,
+                        f"{em.GIFT} **Referral Reward!**\n\n"
+                        f"Your referral **{uname}** joined and verified.\n"
+                        f"{em.MONEY} +{REFERRAL_BONUS} credits added!\n"
+                        f"{em.MONEY} Balance: **{new_balance}**",
+                    )
+                except Exception as e:
+                    log.warning("Failed to notify referrer %d: %s", referrer_id, e)
+
     return web.json_response({"ok": True})
 
 

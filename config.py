@@ -33,6 +33,8 @@ TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 VERIFY_URL = os.getenv("VERIFY_URL", "")
 VERIFY_PORT = int(os.getenv("VERIFY_PORT", "8888"))
 
+REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "1"))
+
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},
     "25": {"credits": 25, "amount_inr": 2500, "label": "25 Credits — ₹25"},
