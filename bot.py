@@ -330,7 +330,7 @@ def _register_handlers(app: Client):
 
         is_adm = await db.is_admin(user_id)
         credits = await db.get_credits(user_id)
-        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
+        credit_line = f"\n{em.MONEY} Credits: **{fmt_credits(credits)}**"
         await message.reply(
             f"{em.WAVE} **Welcome to OTP Bot!**\n\n"
             "Get OTP codes from monitored Telegram numbers.\n"
@@ -343,7 +343,7 @@ def _register_handlers(app: Client):
     async def cb_main_menu(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
         credits = await db.get_credits(cq.from_user.id)
-        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
+        credit_line = f"\n{em.MONEY} Credits: **{fmt_credits(credits)}**"
         await safe_edit(cq.message,
             f"{em.WAVE} **OTP Bot — Main Menu**\n\nChoose an option:{credit_line}",
             reply_markup=main_menu_kb(is_adm),
@@ -352,7 +352,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex("^support$"))
     @verified
     async def cb_support(_, cq: CallbackQuery):
-        lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@f')})" for h in SUPPORT_HANDLES)
+        lines = "\n".join(f"  • [{h.lstrip('@')}](https://t.me/{h.lstrip('@')})" for h in SUPPORT_HANDLES)
         await safe_edit(cq.message,
             f"{em.PHONE} **Support**\n\n"
             f"Having issues? Contact any of our support agents:\n\n"
@@ -624,7 +624,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "addcred", "broadcast",
+        "start", "help", "cancel", "addcred", "broadcast", "info",
     ]))
     async def on_text(_, message: Message):
         user_id = message.from_user.id
@@ -1383,7 +1383,7 @@ def _register_handlers(app: Client):
             credits = u.get("credits", 0)
             all_buttons.append([
                 InlineKeyboardButton(
-                    f"{role_icon} {name} — {em.MONEY} {credits}",
+                    f"{role_icon} {name} — {em.MONEY} {fmt_credits(credits)}",
                     callback_data=f"noop",
                 )
             ])
@@ -1447,7 +1447,7 @@ def _register_handlers(app: Client):
             return
 
         try:
-            amount = int(parts[2])
+            amount = float(parts[2])
             if amount <= 0:
                 await message.reply(f"{em.ERROR} Credits must be a positive number.")
                 return
@@ -1468,26 +1468,85 @@ def _register_handlers(app: Client):
             f"{em.OWNER} **Admin Added Credits**\n\n"
             f"{em.SHIELD} Admin: `{message.from_user.id}`\n"
             f"{em.USER} Target: `{target_id}` ({name})\n"
-            f"{em.ADD} Credits: +{amount}\n"
-            f"{em.MONEY} New balance: {new_balance}"
+            f"{em.ADD} Credits: +{fmt_credits(amount)}\n"
+            f"{em.MONEY} New balance: {fmt_credits(new_balance)}"
         )
 
         await message.reply(
             f"{em.SUCCESS} **Credits added!**\n\n"
             f"{em.USER} User: **{name}**\n"
-            f"{em.ADD} Added: **{amount}**\n"
-            f"{em.MONEY} New balance: **{new_balance}**",
+            f"{em.ADD} Added: **{fmt_credits(amount)}**\n"
+            f"{em.MONEY} New balance: **{fmt_credits(new_balance)}**",
         )
 
         try:
             await bot.send_message(
                 target_id,
                 f"{em.MONEY} **Credits added!**\n\n"
-                f"{em.ADD} {amount} credits added to your account.\n"
-                f"{em.MONEY} New balance: **{new_balance}**",
+                f"{em.ADD} {fmt_credits(amount)} credits added to your account.\n"
+                f"{em.MONEY} New balance: **{fmt_credits(new_balance)}**",
             )
         except Exception:
             pass
+
+    # ── Info ──
+
+    @app.on_message(filters.command("info") & filters.private)
+    @verified
+    async def cmd_info(_, message: Message):
+        if not await db.is_admin(message.from_user.id):
+            await message.reply(f"{em.BLOCKED} Admin only.")
+            return
+
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.reply(
+                "**Usage:** `/info <userid or @username>`\n"
+                "**Example:** `/info 123456789` or `/info @john`"
+            )
+            return
+
+        query = parts[1].strip()
+        if query.startswith("@"):
+            user = await db.db.users.find_one({"username": query.lstrip("@")})
+        else:
+            try:
+                user = await db.get_user(int(query))
+            except ValueError:
+                user = await db.db.users.find_one({"username": query})
+
+        if not user:
+            await message.reply(f"{em.ERROR} User not found.")
+            return
+
+        uid = user["telegram_id"]
+        uname = user.get("username") or "—"
+        fname = user.get("first_name") or "—"
+        role = user.get("role", "user")
+        credits = user.get("credits", 0)
+        verified_status = user.get("verified", False)
+        referred_by = user.get("referred_by")
+        ref_earned = user.get("referral_earned", 0)
+        ref_count = await db.get_referral_count(uid)
+        created = user.get("created_at")
+        created_str = created.strftime("%Y-%m-%d %H:%M UTC") if created else "—"
+
+        role_icon = f"{em.OWNER}" if role == "admin" else f"{em.USER}"
+        verified_icon = f"{em.VERIFIED}" if verified_status else f"{em.UNVERIFIED}"
+
+        ref_line = f"\n{em.LINK} Referred by: `{referred_by}`" if referred_by else ""
+
+        await message.reply(
+            f"{role_icon} **User Info**\n\n"
+            f"{em.ID_BADGE} ID: `{uid}`\n"
+            f"📛 Name: **{fname}**\n"
+            f"{em.USER} Username: @{uname}\n"
+            f"{em.SHIELD} Role: **{role}**\n"
+            f"{verified_icon} Verified: **{'Yes' if verified_status else 'No'}**\n"
+            f"{em.MONEY} Credits: **{fmt_credits(credits)}**\n"
+            f"{em.CALENDAR} Joined: {created_str}\n"
+            f"{em.GIFT} Referrals: **{ref_count}** | Earned: **{fmt_credits(ref_earned)}**{ref_line}",
+        )
 
     # ── Broadcast ──
 
@@ -1730,7 +1789,7 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
         if credits < price:
             await cq.answer(
-                f"{em.ERROR} You need {price} credits but have {credits}. Buy more credits!",
+                f"{em.ERROR} You need {fmt_credits(price)} credits but have {fmt_credits(credits)}. Buy more credits!",
                 show_alert=True,
             )
             return
@@ -1787,10 +1846,10 @@ def _register_handlers(app: Client):
             f"{em.USER} User: `{cq.from_user.id}` (@{uname})\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"{em.MONEY} Price: **{price}** credits"
+            f"{em.MONEY} Price: **{fmt_credits(price)}** credits"
         )
         credits = await db.get_credits(cq.from_user.id)
-        credit_line = f"\n{em.MONEY} Credits: {credits}"
+        credit_line = f"\n{em.MONEY} Credits: {fmt_credits(credits)}"
         pwd = session.get("password", "")
         pwd_line = f"\n{em.PASSWORD} 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
@@ -1802,7 +1861,7 @@ def _register_handlers(app: Client):
             f"{em.SUCCESS} **Number assigned!**\n\n"
             f"{flag} {name}\n"
             f"{em.PHONE} `{phone}`\n"
-            f"{em.MONEY} Price: **{price}** credits (deducted)\n"
+            f"{em.MONEY} Price: **{fmt_credits(price)}** credits (deducted)\n"
             f"{em.TIMER} Timeout: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}{pwd_line}\n\n"
             "Any OTP received on this number will be forwarded to you.\n\n"
             f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
@@ -1914,7 +1973,7 @@ def _register_handlers(app: Client):
         ]
         await safe_edit(cq.message,
             f"{em.CREDIT} **Buy Credits**\n\n"
-            f"{em.MONEY} Your balance: **{credits}**\n\n"
+            f"{em.MONEY} Your balance: **{fmt_credits(credits)}**\n\n"
             "Choose a payment method:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -2202,7 +2261,7 @@ async def _handle_phone(message: Message, phone: str):
 
     try:
         client = Client(
-            name=f"auth_{phone.replace('+', 'f')}",
+            name=f"auth_{phone.replace('+', '')}",
             api_id=API_ID,
             api_hash=API_HASH,
             in_memory=True,
@@ -2276,8 +2335,8 @@ async def _handle_code(message: Message, code: str):
         await safe_edit(status_msg,
             f"{em.SUCCESS} Code verified for `{phone}`\n\n"
             f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{acc_year or 'Unknownf'}**\n"
-            f"{em.MAIL} Email added: **{'Yes' if has_email else 'Nof'}**\n\n"
+            f"{em.CALENDAR} Account year: **{acc_year or 'Unknown'}**\n"
+            f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
@@ -2339,8 +2398,8 @@ async def _handle_password(message: Message, password: str):
         await safe_edit(status_msg,
             f"{em.SUCCESS} Password accepted for `{phone}`\n\n"
             f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{acc_year or 'Unknownf'}**\n"
-            f"{em.MAIL} Email added: **{'Yes' if has_email else 'Nof'}**\n\n"
+            f"{em.CALENDAR} Account year: **{acc_year or 'Unknown'}**\n"
+            f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
@@ -2364,7 +2423,7 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
     cc, cname, cflag = detect_country(phone)
     try:
         client = Client(
-            name=f"auth_{phone.replace('+', 'f')}",
+            name=f"auth_{phone.replace('+', '')}",
             api_id=API_ID,
             api_hash=API_HASH,
             in_memory=True,
@@ -2458,9 +2517,9 @@ async def _handle_manual_country(message: Message, text: str):
         email_added = state.get("email_added", False)
         await message.reply(
             f"{em.GLOBE} Found: {flag} **{name}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{year or 'Unknownf'}**\n"
+            f"{em.CALENDAR} Account year: **{year or 'Unknown'}**\n"
             f"{em.MAIL} Email added: **{'Yes' if email_added else 'No'}**\n\n"
-            f"Confirm this country for `{state['phonef']}`?",
+            f"Confirm this country for `{state['phone']}`?",
             reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
         )
         return
@@ -2647,7 +2706,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
                 f"{em.USER} User: `{user_id}`\n"
                 f"{em.GIFT} Credits: +{plan['credits']}\n"
                 f"{em.DOLLAR} Amount: ₹{plan['amount_inr'] // 100}\n"
-                f"{em.MONEY} New balance: {new_balance}"
+                f"{em.MONEY} New balance: {fmt_credits(new_balance)}"
             )
             try:
                 await qr_msg.delete()
@@ -2657,7 +2716,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
                 user_id,
                 f"{em.SUCCESS} **Payment received!**\n\n"
                 f"{em.GIFT} +{plan['credits']} credits added\n"
-                f"{em.MONEY} New balance: **{new_balance}**",
+                f"{em.MONEY} New balance: **{fmt_credits(new_balance)}**",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -2723,13 +2782,13 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
         f"{em.USER} User: `{user_id}`\n"
         f"{em.GIFT} Credits: +{plan['credits']}\n"
         f"{em.DOLLAR} Amount: {pstate['amount_usdt']} USDT\n"
-        f"{em.MONEY} New balance: {new_balance}"
+        f"{em.MONEY} New balance: {fmt_credits(new_balance)}"
     )
 
     await safe_edit(status_msg,
         f"{em.SUCCESS} **Deposit confirmed!**\n\n"
         f"{em.GIFT} +{plan['credits']} credits added\n"
-        f"{em.MONEY} New balance: **{new_balance}**",
+        f"{em.MONEY} New balance: **{fmt_credits(new_balance)}**",
         reply_markup=back_kb("main_menu"),
     )
 

@@ -466,7 +466,7 @@ async def get_referral_count(telegram_id: int) -> int:
     return await db.users.count_documents({"referred_by": telegram_id})
 
 
-async def get_referral_earned(telegram_id: int) -> int:
+async def get_referral_earned(telegram_id: int) -> float:
     user = await get_user(telegram_id)
     if not user:
         return 0

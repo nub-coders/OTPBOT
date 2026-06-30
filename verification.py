@@ -157,7 +157,7 @@ async def handle_verify(request):
             await db.mark_referral_rewarded(uid)
             if REFERRAL_VERIFY_BONUS > 0:
                 await db.add_referral_earning(referrer_id, REFERRAL_VERIFY_BONUS)
-                log.info("Referral reward: %d credits to user %d for referring %d", REFERRAL_VERIFY_BONUS, referrer_id, uid)
+                log.info("Referral reward: %s credits to user %d for referring %d", REFERRAL_VERIFY_BONUS, referrer_id, uid)
                 try:
                     from bot import bot
                     import custom_emojis as em
@@ -167,8 +167,8 @@ async def handle_verify(request):
                         referrer_id,
                         f"{em.GIFT} **Referral Reward!**\n\n"
                         f"Your referral **{uname}** joined and verified.\n"
-                        f"{em.MONEY} +{REFERRAL_VERIFY_BONUS} credits added!\n"
-                        f"{em.MONEY} Balance: **{new_balance}**",
+                        f"{em.MONEY} +{REFERRAL_VERIFY_BONUS:g} credits added!\n"
+                        f"{em.MONEY} Balance: **{new_balance:g}**",
                     )
                 except Exception as e:
                     log.warning("Failed to notify referrer %d: %s", referrer_id, e)
