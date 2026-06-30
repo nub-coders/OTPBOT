@@ -624,7 +624,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "addcred", "broadcast", "info",
+        "start", "help", "cancel", "addcred", "removecred", "broadcast", "info",
     ]))
     async def on_text(_, message: Message):
         user_id = message.from_user.id
@@ -1498,6 +1498,78 @@ def _register_handlers(app: Client):
         except Exception:
             pass
 
+    @app.on_message(filters.command("removecred") & filters.private)
+    @verified
+    async def cmd_removecred(_, message: Message):
+        if not await db.is_admin(message.from_user.id):
+            await message.reply(f"{em.BLOCKED} Admin only.")
+            return
+
+        parts = message.text.split()
+        if len(parts) != 3:
+            await message.reply(
+                "**Usage:** `/removecred <userid> <credits>`\n"
+                "**Example:** `/removecred 123456789 50`"
+            )
+            return
+
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            await message.reply(f"{em.ERROR} Invalid user ID.")
+            return
+
+        try:
+            amount = int(parts[2])
+            if amount <= 0:
+                await message.reply(f"{em.ERROR} Credits must be a positive number.")
+                return
+        except ValueError:
+            await message.reply(f"{em.ERROR} Invalid credits amount.")
+            return
+
+        target = await db.get_user(target_id)
+        if not target:
+            await message.reply(f"{em.ERROR} User `{target_id}` not found.")
+            return
+
+        current = await db.get_credits(target_id)
+        if current < amount:
+            await message.reply(
+                f"{em.ERROR} User only has **{current}** credits. "
+                f"Cannot remove **{amount}**."
+            )
+            return
+
+        await db.deduct_credits(target_id, amount)
+        new_balance = await db.get_credits(target_id)
+        name = target.get("first_name") or target.get("username") or str(target_id)
+
+        await alert(app,
+            f"{em.OWNER} **Admin Removed Credits**\n\n"
+            f"{em.SHIELD} Admin: `{message.from_user.id}`\n"
+            f"{em.USER} Target: `{target_id}` ({name})\n"
+            f"{em.ERROR} Credits: -{amount}\n"
+            f"{em.MONEY} New balance: {new_balance}"
+        )
+
+        await message.reply(
+            f"{em.SUCCESS} **Credits removed!**\n\n"
+            f"{em.USER} User: **{name}**\n"
+            f"{em.ERROR} Removed: **{amount}**\n"
+            f"{em.MONEY} New balance: **{new_balance}**",
+        )
+
+        try:
+            await bot.send_message(
+                target_id,
+                f"{em.MONEY} **Credits removed**\n\n"
+                f"{em.ERROR} {amount} credits removed from your account.\n"
+                f"{em.MONEY} New balance: **{new_balance}**",
+            )
+        except Exception:
+            pass
+
     # ── Info ──
 
     @app.on_message(filters.command("info") & filters.private)
@@ -2191,6 +2263,7 @@ def _register_handlers(app: Client):
         admin_section = (
             f"\n\n{em.GEAR} **Admin Commands:**\n"
             "  /addcred `<userid>` `<credits>` — Add credits to a user\n"
+            "  /removecred `<userid>` `<credits>` — Remove credits from a user\n"
             "  /info `<userid or @username>` — Look up user details\n"
             "  /broadcast `<message>` — Broadcast to all users\n"
             "  /broadcast `-name` `<message>` — Broadcast with your name"
