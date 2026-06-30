@@ -20,7 +20,7 @@ from pyrogram.errors import (
     MessageNotModified,
 )
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION
 import database as db
 import clients
 import payments
@@ -91,7 +91,7 @@ async def alert(bot: Client, text: str):
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
 
-VERIFICATION_ENABLED = bool(TURNSTILE_SITE_KEY and VERIFY_URL)
+VERIFICATION_ENABLED = bool(ENABLE_VERIFICATION and TURNSTILE_SITE_KEY and VERIFY_URL)
 
 
 async def _check_referral_reward(user_id: int):
