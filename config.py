@@ -28,6 +28,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 USDT_TO_INR = float(os.getenv("USDT_TO_INR", "95"))
 
+ENABLE_VERIFICATION = os.getenv("ENABLE_VERIFICATION", "True").lower() in ("true", "1", "yes")
 TURNSTILE_SITE_KEY = os.getenv("TURNSTILE_SITE_KEY", "")
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 VERIFY_URL = os.getenv("VERIFY_URL", "")
