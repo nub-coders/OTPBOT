@@ -20,7 +20,7 @@ from pyrogram.errors import (
     MessageNotModified,
 )
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS
 import database as db
 import clients
 import payments
@@ -34,6 +34,10 @@ log = logging.getLogger(__name__)
 bot: Client = None
 auth_states: dict[int, dict] = {}
 pay_states: dict[int, dict] = {}
+
+
+def fmt_credits(value) -> str:
+    return f"{value:g}"
 
 
 def get_credit_plan(plan_key: str) -> dict | None:
@@ -92,6 +96,35 @@ async def alert(bot: Client, text: str):
 
 
 VERIFICATION_ENABLED = bool(TURNSTILE_SITE_KEY and VERIFY_URL)
+
+
+async def _check_referral_reward(user_id: int):
+    if await db.is_referral_rewarded(user_id):
+        return
+    user = await db.get_user(user_id)
+    if not user:
+        return
+    referrer_id = user.get("referred_by")
+    if not referrer_id:
+        return
+    referrer = await db.get_user(referrer_id)
+    if not referrer:
+        return
+    await db.mark_referral_rewarded(user_id)
+    if REFERRAL_BONUS > 0:
+        await db.add_referral_earning(referrer_id, REFERRAL_BONUS)
+        try:
+            uname = user.get("first_name") or user.get("username") or str(user_id)
+            new_balance = await db.get_credits(referrer_id)
+            await bot.send_message(
+                referrer_id,
+                f"{em.GIFT} **Referral Reward!**\n\n"
+                f"Your referral **{uname}** made their first purchase.\n"
+                f"{em.MONEY} +{fmt_credits(REFERRAL_BONUS)} credits added!\n"
+                f"{em.MONEY} Balance: **{fmt_credits(new_balance)}**",
+            )
+        except Exception:
+            pass
 
 
 def verified(func):
@@ -339,11 +372,12 @@ def _register_handlers(app: Client):
 
         await safe_edit(cq.message,
             f"{em.GIFT} **Refer & Earn**\n\n"
-            f"Share your referral link and earn **{REFERRAL_BONUS} credits** "
-            f"when your friend makes their first purchase!\n\n"
+            f"Share your referral link and earn credits!\n\n"
+            f"{em.SHIELD} **{fmt_credits(REFERRAL_VERIFY_BONUS)} credits** when your friend verifies\n"
+            f"{em.CREDIT} **{fmt_credits(REFERRAL_BONUS)} credits** on their first purchase\n\n"
             f"{em.LINK} **Your link:**\n`{ref_link}`\n\n"
             f"{em.USERS} Referrals: **{ref_count}**\n"
-            f"{em.MONEY} Total earned: **{ref_earned}** credits",
+            f"{em.MONEY} Total earned: **{fmt_credits(ref_earned)}** credits",
             reply_markup=back_kb(),
         )
 
@@ -2606,6 +2640,7 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
                 return
             await db.add_credits(user_id, plan["credits"])
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
+            await _check_referral_reward(user_id)
             new_balance = await db.get_credits(user_id)
             await alert(bot,
                 f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
@@ -2680,6 +2715,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     await db.mark_tx_used(tx_hash, user_id, plan_key)
     await db.add_credits(user_id, plan["credits"])
     await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
+    await _check_referral_reward(user_id)
     new_balance = await db.get_credits(user_id)
 
     await alert(bot,
