@@ -91,14 +91,14 @@ async def consume_verify_token(token: str) -> int | None:
 
 # ── Credits ──
 
-async def get_credits(telegram_id: int) -> int:
+async def get_credits(telegram_id: int) -> float:
     user = await get_user(telegram_id)
     if not user:
         return 0
     return user.get("credits", 0)
 
 
-async def add_credits(telegram_id: int, amount: int):
+async def add_credits(telegram_id: int, amount: float):
     await db.users.update_one(
         {"telegram_id": telegram_id},
         {"$inc": {"credits": amount}},
@@ -113,7 +113,7 @@ async def deduct_credit(telegram_id: int) -> bool:
     return result.modified_count > 0
 
 
-async def deduct_credits(telegram_id: int, amount: int) -> bool:
+async def deduct_credits(telegram_id: int, amount: float) -> bool:
     result = await db.users.update_one(
         {"telegram_id": telegram_id, "credits": {"$gte": amount}},
         {"$inc": {"credits": -amount}},
@@ -473,7 +473,7 @@ async def get_referral_earned(telegram_id: int) -> int:
     return user.get("referral_earned", 0)
 
 
-async def add_referral_earning(telegram_id: int, amount: int):
+async def add_referral_earning(telegram_id: int, amount: float):
     await db.users.update_one(
         {"telegram_id": telegram_id},
         {"$inc": {"referral_earned": amount, "credits": amount}},
