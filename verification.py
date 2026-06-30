@@ -36,6 +36,9 @@ p{color:#8b9bb4;font-size:.95rem;margin-bottom:24px}
 .status.err{background:#3a1a1a;color:#f87171;display:block}
 .status.wait{background:#2a2a1a;color:#facc15;display:block}
 .expired{color:#f87171;font-size:1.1rem;margin-top:16px}
+.btn{display:inline-block;margin-top:16px;padding:12px 28px;border-radius:10px;
+background:#2d6cdf;color:#fff;text-decoration:none;font-weight:600;font-size:.95rem;
+transition:background .2s}.btn:hover{background:#3b7bf0}
 </style>
 </head>
 <body>
@@ -61,7 +64,7 @@ async function onToken(cfToken) {
     const d = await r.json();
     if (d.ok) {
       el.className = "status ok";
-      el.textContent = "Verified! You can close this page and return to the bot.";
+      el.innerHTML = 'Verified! <a class="btn" href="https://t.me/{{BOT_USERNAME}}">Return to Bot</a>';
     } else {
       el.className = "status err";
       el.textContent = d.error || "Verification failed. Try again.";
@@ -115,9 +118,17 @@ async def handle_page(request):
     from datetime import datetime, timezone
     if doc["expires_at"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return web.Response(text=EXPIRED_HTML, content_type="text/html", status=410)
+    bot_username = ""
+    try:
+        from bot import bot as bot_app
+        if bot_app and bot_app.me:
+            bot_username = bot_app.me.username or ""
+    except Exception:
+        pass
     html = (VERIFY_HTML
             .replace("{{SITE_KEY}}", TURNSTILE_SITE_KEY)
-            .replace("{{VTOKEN}}", vtoken))
+            .replace("{{VTOKEN}}", vtoken)
+            .replace("{{BOT_USERNAME}}", bot_username))
     return web.Response(text=html, content_type="text/html")
 
 

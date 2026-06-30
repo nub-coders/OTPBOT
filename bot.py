@@ -1826,6 +1826,7 @@ def _register_handlers(app: Client):
                 masked = mask_phone(phone)
                 await alert(app,
                     f"{em.ALERT} **Password Check Failed**\n\n"
+                    f"{em.USER} Requested by: `{cq.from_user.id}`\n"
                     f"{em.PHONE} Number: `{phone}`\n"
                     f"{em.ERROR} Error: `{err[:200]}`\n"
                     f"{em.PASSWORD} Stored password may be wrong or changed."
@@ -2725,9 +2726,11 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
             await _check_referral_reward(user_id)
             new_balance = await db.get_credits(user_id)
+            buyer = await db.get_user(user_id)
+            buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
             await alert(bot,
                 f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
-                f"{em.USER} User: `{user_id}`\n"
+                f"{em.USER} User: `{user_id}` ({buyer_name})\n"
                 f"{em.GIFT} Credits: +{plan['credits']}\n"
                 f"{em.DOLLAR} Amount: ₹{plan['amount_inr'] // 100}\n"
                 f"{em.MONEY} New balance: {new_balance}"
@@ -2815,12 +2818,16 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
     await _check_referral_reward(user_id)
     new_balance = await db.get_credits(user_id)
+    buyer = await db.get_user(user_id)
+    buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
 
     await alert(bot,
         f"{em.COIN} **Credits Purchased (Crypto)**\n\n"
-        f"{em.USER} User: `{user_id}`\n"
+        f"{em.USER} User: `{user_id}` ({buyer_name})\n"
         f"{em.GIFT} Credits: +{plan['credits']}\n"
         f"{em.DOLLAR} Amount: {pstate['amount_usdt']} USDT\n"
+        f"{em.GLOBE} Network: {pstate['network']}\n"
+        f"{em.LINK} TX: `{tx_hash[:16]}...`\n"
         f"{em.MONEY} New balance: {new_balance}"
     )
 
