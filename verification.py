@@ -167,8 +167,8 @@ async def handle_verify(request):
                         referrer_id,
                         f"{em.GIFT} **Referral Reward!**\n\n"
                         f"Your referral **{uname}** joined and verified.\n"
-                        f"{em.MONEY} +{REFERRAL_VERIFY_BONUS:g} credits added!\n"
-                        f"{em.MONEY} Balance: **{new_balance:g}**",
+                        f"{em.MONEY} +{REFERRAL_VERIFY_BONUS} credits added!\n"
+                        f"{em.MONEY} Balance: **{new_balance}**",
                     )
                 except Exception as e:
                     log.warning("Failed to notify referrer %d: %s", referrer_id, e)

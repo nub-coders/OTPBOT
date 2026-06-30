@@ -85,7 +85,9 @@ async def _on_new_message(client: Client, message):
                     user_id,
                     f"📩 **New message on** `{phone}`\n\n"
                     f"👤 From: {sender_name}\n"
-                    f"📝 {text[:500] if text else '(no text)'}",
+                    f"📝 {text[:500] if text else '(no text)'}\n\n"
+                    f"ℹ️ This message didn't contain an OTP code. "
+                    f"If you expected one, wait for the next message.",
                 )
                 log.info("[%s] Non-OTP message forwarded to user %d", phone, user_id)
             except Exception as e:

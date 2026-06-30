@@ -91,14 +91,14 @@ async def consume_verify_token(token: str) -> int | None:
 
 # ── Credits ──
 
-async def get_credits(telegram_id: int) -> float:
+async def get_credits(telegram_id: int) -> int:
     user = await get_user(telegram_id)
     if not user:
         return 0
     return user.get("credits", 0)
 
 
-async def add_credits(telegram_id: int, amount: float):
+async def add_credits(telegram_id: int, amount: int):
     await db.users.update_one(
         {"telegram_id": telegram_id},
         {"$inc": {"credits": amount}},
@@ -113,7 +113,7 @@ async def deduct_credit(telegram_id: int) -> bool:
     return result.modified_count > 0
 
 
-async def deduct_credits(telegram_id: int, amount: float) -> bool:
+async def deduct_credits(telegram_id: int, amount: int) -> bool:
     result = await db.users.update_one(
         {"telegram_id": telegram_id, "credits": {"$gte": amount}},
         {"$inc": {"credits": -amount}},
@@ -466,14 +466,14 @@ async def get_referral_count(telegram_id: int) -> int:
     return await db.users.count_documents({"referred_by": telegram_id})
 
 
-async def get_referral_earned(telegram_id: int) -> float:
+async def get_referral_earned(telegram_id: int) -> int:
     user = await get_user(telegram_id)
     if not user:
         return 0
     return user.get("referral_earned", 0)
 
 
-async def add_referral_earning(telegram_id: int, amount: float):
+async def add_referral_earning(telegram_id: int, amount: int):
     await db.users.update_one(
         {"telegram_id": telegram_id},
         {"$inc": {"referral_earned": amount, "credits": amount}},
@@ -487,10 +487,22 @@ async def has_made_purchase(telegram_id: int) -> bool:
 async def mark_referral_rewarded(telegram_id: int):
     await db.users.update_one(
         {"telegram_id": telegram_id},
-        {"$set": {"referral_rewarded": True}},
+        {"$set": {"referral_verify_rewarded": True}},
     )
 
 
 async def is_referral_rewarded(telegram_id: int) -> bool:
     user = await get_user(telegram_id)
-    return user is not None and user.get("referral_rewarded", False)
+    return user is not None and user.get("referral_verify_rewarded", False)
+
+
+async def mark_referral_purchase_rewarded(telegram_id: int):
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"referral_purchase_rewarded": True}},
+    )
+
+
+async def is_referral_purchase_rewarded(telegram_id: int) -> bool:
+    user = await get_user(telegram_id)
+    return user is not None and user.get("referral_purchase_rewarded", False)

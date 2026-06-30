@@ -49,7 +49,7 @@ async def recover_pending_payments(bot):
     """On startup, resume checking any pending Razorpay payments."""
     import database as db
     import payments
-    from bot import get_credit_plan, back_kb, _check_referral_reward, fmt_credits
+    from bot import get_credit_plan, back_kb, _check_referral_reward
 
     pending = await db.get_pending_payments()
     if not pending:
@@ -83,7 +83,7 @@ async def recover_pending_payments(bot):
                     user_id,
                     f"✅ **Payment received!** (recovered after restart)\n\n"
                     f"🎁 +{plan['credits']} credits added\n"
-                    f"💰 New balance: **{fmt_credits(new_balance)}**",
+                    f"💰 New balance: **{new_balance}**",
                     reply_markup=back_kb("main_menu"),
                 )
             except Exception:
@@ -100,7 +100,7 @@ async def recover_pending_payments(bot):
 async def refund_processor(bot):
     """Background task that processes pending refunds every 60 seconds."""
     import database as db
-    from bot import alert, fmt_credits
+    from bot import alert
     while True:
         try:
             due = await db.get_due_refunds()
@@ -116,15 +116,16 @@ async def refund_processor(bot):
                     f"💰 **Refund Issued**\n\n"
                     f"👤 User: `{user_id}`\n"
                     f"📱 Number: `{phone}`\n"
-                    f"➕ Credits: +{fmt_credits(amount)}\n"
-                    f"💰 New balance: {fmt_credits(new_balance)}"
+                    f"➕ Credits: +{amount}\n"
+                    f"💰 New balance: {new_balance}"
                 )
                 try:
                     await bot.send_message(
                         user_id,
                         f"💰 **Credits refunded!**\n\n"
-                        f"➕ **{fmt_credits(amount)}** credits returned to your account.\n"
-                        f"💰 New balance: **{fmt_credits(new_balance)}**",
+                        f"📱 Number: `{phone}`\n"
+                        f"➕ **{amount}** credits returned to your account.\n"
+                        f"💰 New balance: **{new_balance}**",
                     )
                 except Exception:
                     pass
@@ -137,7 +138,7 @@ async def payment_recovery_processor(bot):
     """Background task that checks still-pending payments every 30 seconds."""
     import database as db
     import payments
-    from bot import get_credit_plan, back_kb, _check_referral_reward, fmt_credits
+    from bot import get_credit_plan, back_kb, _check_referral_reward
 
     while True:
         try:
@@ -170,7 +171,7 @@ async def payment_recovery_processor(bot):
                             user_id,
                             f"✅ **Payment received!**\n\n"
                             f"🎁 +{plan['credits']} credits added\n"
-                            f"💰 New balance: **{fmt_credits(new_balance)}**",
+                            f"💰 New balance: **{new_balance}**",
                             reply_markup=back_kb("main_menu"),
                         )
                     except Exception:
