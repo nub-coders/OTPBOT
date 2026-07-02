@@ -315,6 +315,22 @@ def _register_handlers(app: Client):
                     f"{em.ID_BADGE} ID: `{user_id}`\n"
                     f"📛 Name: @{uname}{ref_line}"
                 )
+                if not VERIFICATION_ENABLED and referrer_id and REFERRAL_VERIFY_BONUS > 0:
+                    referrer = await db.get_user(referrer_id)
+                    if referrer:
+                        await db.mark_referral_rewarded(user_id)
+                        await db.add_referral_earning(referrer_id, REFERRAL_VERIFY_BONUS)
+                        try:
+                            new_balance = await db.get_credits(referrer_id)
+                            await bot.send_message(
+                                referrer_id,
+                                f"{em.GIFT} **Referral Reward!**\n\n"
+                                f"Your referral **{uname}** joined the bot.\n"
+                                f"{em.MONEY} +{REFERRAL_VERIFY_BONUS} credits added!\n"
+                                f"{em.MONEY} Balance: **{new_balance}**",
+                            )
+                        except Exception:
+                            pass
 
             if role == "admin":
                 await message.reply(
@@ -371,7 +387,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.GIFT} **Refer & Earn**\n\n"
             f"Share your referral link and earn credits!\n\n"
-            f"{em.SHIELD} **{REFERRAL_VERIFY_BONUS} credits** when your friend verifies\n"
+            f"{em.SHIELD} **{REFERRAL_VERIFY_BONUS} credits** when your friend {'verifies' if VERIFICATION_ENABLED else 'joins'}\n"
             f"{em.CREDIT} **{REFERRAL_BONUS} credits** on their first purchase\n\n"
             f"{em.LINK} **Your link:**\n`{ref_link}`\n\n"
             f"{em.USERS} Referrals: **{ref_count}**\n"
