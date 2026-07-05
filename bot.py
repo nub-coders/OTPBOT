@@ -159,7 +159,7 @@ def verified(func):
                 if not await db.is_verified(user_id):
                     url = await verification.create_verification_link(user_id)
                     kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{em.SHIELD} Verify", url=url)],
+                        [InlineKeyboardButton(f"{em.SHIELD} Verify", url=url, style=S.PRIMARY)],
                     ])
                     text = (
                         f"{em.SHIELD} **Verification Required**\n\n"
@@ -426,7 +426,7 @@ def _register_handlers(app: Client):
             "Example: `+1234567890`\n\n"
             "Country and pricing will be detected automatically.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)],
             ]),
         )
 
@@ -460,11 +460,11 @@ def _register_handlers(app: Client):
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1"),
-                    InlineKeyboardButton(year_label, callback_data="noop"),
-                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1", style=S.DEFAULT),
+                    InlineKeyboardButton(year_label, callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1", style=S.DEFAULT),
                 ],
-                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set")],
+                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set", style=S.SUCCESS)],
             ]),
         )
 
@@ -485,11 +485,11 @@ def _register_handlers(app: Client):
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1"),
-                    InlineKeyboardButton(year_label, callback_data="noop"),
-                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data="ay_adj:-1", style=S.DEFAULT),
+                    InlineKeyboardButton(year_label, callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data="ay_adj:+1", style=S.DEFAULT),
                 ],
-                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set")],
+                [InlineKeyboardButton(f"{em.SUCCESS} Set", callback_data="ay_set", style=S.SUCCESS)],
             ]),
         )
         await cq.answer()
@@ -543,7 +543,7 @@ def _register_handlers(app: Client):
                 f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)]
                 ])
             )
             return
@@ -586,7 +586,7 @@ def _register_handlers(app: Client):
             "Type the country name or send its flag emoji:\n"
             "Example: `India` or `🇮🇳`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)],
             ]),
         )
 
@@ -616,7 +616,7 @@ def _register_handlers(app: Client):
                 f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)]
                 ])
             )
             return
@@ -738,7 +738,7 @@ def _register_handlers(app: Client):
             all_lines.append(f"{flag} **{name}** ({cc}) — **({display_str})** — {info['active']}/{info['total']} numbers")
             all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {btn_str}",
-                callback_data=f"setcprice:{cc}",
+                callback_data=f"setcprice:{cc}", style=S.DEFAULT,
             )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_cp", "admin_panel")
@@ -777,10 +777,10 @@ def _register_handlers(app: Client):
                 lines.append(f"{em.CALENDAR} Year: **{year}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
                 buttons.append([InlineKeyboardButton(
                     f"{em.EDIT} {year} | Email: {email_str} — {price} cr",
-                    callback_data=f"editcat:{cc}:{year}:{email}",
+                    callback_data=f"editcat:{cc}:{year}:{email}", style=S.DEFAULT,
                 )])
         
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="country_pricing")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="country_pricing", style=S.DEFAULT)])
 
         await safe_edit(cq.message,
             f"{em.MONEY} **Category Pricing — {flag} {name} ({cc})**\n\n" + "\n".join(lines),
@@ -814,7 +814,7 @@ def _register_handlers(app: Client):
             f"{em.MAIL} Email Added: **{email_str}**\n\n"
             f"Send the new price (in credits) for this category:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"setcprice:{cc}")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"setcprice:{cc}", style=S.DANGER)]
             ])
         )
 
@@ -867,7 +867,7 @@ def _register_handlers(app: Client):
                 price_str = f"{p} cr" if p is not None else "No price"
                 all_buttons.append([InlineKeyboardButton(
                     f"{status_icon} {flag} {phone}{year_str} — {price_str}",
-                    callback_data=f"num_actions:{phone}",
+                    callback_data=f"num_actions:{phone}", style=S.DEFAULT,
                 )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_ln", "admin_panel")
@@ -889,8 +889,8 @@ def _register_handlers(app: Client):
             f"{em.WARNING} Remove `{phone}` and disconnect its session?",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton(f"{em.SUCCESS} Yes", callback_data=f"confirm_rm:{phone}"),
-                    InlineKeyboardButton(f"{em.ERROR} No", callback_data="list_numbers"),
+                    InlineKeyboardButton(f"{em.SUCCESS} Yes", callback_data=f"confirm_rm:{phone}", style=S.SUCCESS),
+                    InlineKeyboardButton(f"{em.ERROR} No", callback_data="list_numbers", style=S.DANGER),
                 ],
             ]),
         )
@@ -961,23 +961,23 @@ def _register_handlers(app: Client):
 
         buttons = [
             [
-                InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}"),
-                InlineKeyboardButton(f"{em.PASSWORD} Update Password", callback_data=f"updpwd:{phone}"),
+                InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}", style=S.PRIMARY),
+                InlineKeyboardButton(f"{em.PASSWORD} Update Password", callback_data=f"updpwd:{phone}", style=S.DEFAULT),
             ],
             [
-                InlineKeyboardButton(f"{em.CONFIG} Edit Category", callback_data=f"editnum:{phone}"),
-                InlineKeyboardButton(f"{em.ERROR} Remove", callback_data=f"rm:{phone}"),
+                InlineKeyboardButton(f"{em.CONFIG} Edit Category", callback_data=f"editnum:{phone}", style=S.DEFAULT),
+                InlineKeyboardButton(f"{em.ERROR} Remove", callback_data=f"rm:{phone}", style=S.DANGER),
             ],
         ]
         if status == "active":
             buttons.insert(0, [InlineKeyboardButton(
-                f"{em.OFFLINE} Unlist from Sale", callback_data=f"unlist:{phone}",
+                f"{em.OFFLINE} Unlist from Sale", callback_data=f"unlist:{phone}", style=S.DANGER,
             )])
         elif status != "sold":
             buttons.insert(0, [InlineKeyboardButton(
-                f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}",
+                f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}", style=S.SUCCESS,
             )])
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="list_numbers")])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="list_numbers", style=S.DEFAULT)])
         await safe_edit(cq.message, info, reply_markup=InlineKeyboardMarkup(buttons))
 
     @app.on_callback_query(filters.regex(r"^relist:"))
@@ -1002,7 +1002,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.SUCCESS} `{phone}` ({flag} {name}) is now **active** and available for sale.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
             ]),
         )
 
@@ -1028,7 +1028,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.OFFLINE} `{phone}` ({flag} {name}) is now **unlisted** and hidden from buyers.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
             ]),
         )
 
@@ -1062,7 +1062,7 @@ def _register_handlers(app: Client):
             year_str = f" ~{acc_year}" if acc_year else ""
             all_buttons.append([InlineKeyboardButton(
                 f"{em.OFFLINE} {flag} {phone}{year_str} — {sold_price} cr",
-                callback_data=f"sold_detail:{phone}",
+                callback_data=f"sold_detail:{phone}", style=S.DEFAULT,
             )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_sl", "admin_panel")
@@ -1124,10 +1124,10 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, info,
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}"),
-                    InlineKeyboardButton(f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}"),
+                    InlineKeyboardButton(f"{em.SEARCH} Verify", callback_data=f"verify:{phone}", style=S.PRIMARY),
+                    InlineKeyboardButton(f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}", style=S.SUCCESS),
                 ],
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="sold_list")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="sold_list", style=S.DEFAULT)],
             ]),
         )
 
@@ -1158,7 +1158,7 @@ def _register_handlers(app: Client):
                 f"No price set for this combination.\n"
                 f"Send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")]
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}", style=S.DANGER)]
                 ]),
             )
             return
@@ -1173,17 +1173,17 @@ def _register_handlers(app: Client):
             f"{em.MONEY} Current Price: **{price}** credits\n\n"
             "Select what to change:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}", style=S.PRIMARY)],
                 [
-                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1"),
-                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop"),
-                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1", style=S.DEFAULT),
                 ],
                 [InlineKeyboardButton(
                     f"{em.MAIL} Email: {email_str} — Tap to toggle",
-                    callback_data=f"echg_em:{phone}",
+                    callback_data=f"echg_em:{phone}", style=S.DEFAULT,
                 )],
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
             ]),
         )
 
@@ -1268,7 +1268,7 @@ def _register_handlers(app: Client):
             "Type the country name or send its flag emoji:\n"
             "Example: `India` or `🇮🇳`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}", style=S.DANGER)],
             ]),
         )
 
@@ -1319,7 +1319,7 @@ def _register_handlers(app: Client):
             await safe_edit(cq.message,
                 f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
                 ]),
             )
         else:
@@ -1329,8 +1329,8 @@ def _register_handlers(app: Client):
                 f"❗ Error: `{error[:200]}`\n\n"
                 "Would you like to re-add this number?",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}")],
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
                 ]),
             )
 
@@ -1384,7 +1384,7 @@ def _register_handlers(app: Client):
             await safe_edit(cq.message,
                 f"{em.ERROR} Failed to connect: `{e}`",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
                 ]),
             )
             return
@@ -1402,7 +1402,7 @@ def _register_handlers(app: Client):
                 f"Current stored password: `{session['password']}`\n\n"
                 "Send the **current 2FA password** to verify:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)],
                 ]),
             )
         else:
@@ -1410,7 +1410,7 @@ def _register_handlers(app: Client):
                 f"{em.PASSWORD} **Update Password for** `{phone}`\n\n"
                 "No password stored. Send the **current 2FA password**:",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)],
                 ]),
             )
 
@@ -1445,7 +1445,7 @@ def _register_handlers(app: Client):
             all_buttons.append([
                 InlineKeyboardButton(
                     f"{role_icon} {name} — {em.MONEY} {credits}",
-                    callback_data=f"noop",
+                    callback_data=f"noop", style=S.DEFAULT,
                 )
             ])
 
@@ -1454,13 +1454,13 @@ def _register_handlers(app: Client):
         total_pages = (len(all_buttons) + PAGE_SIZE - 1) // PAGE_SIZE
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_ul:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_ul:{page - 1}", style=S.DEFAULT))
         if (page + 1) * PAGE_SIZE < len(all_buttons):
-            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_ul:{page + 1}"))
+            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_ul:{page + 1}", style=S.PRIMARY))
         if nav:
             page_btns.append(nav)
         page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-        page_btns.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel")])
+        page_btns.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)])
 
         await safe_edit(cq.message,
             f"{em.USERS} **Users** ({len(users)})" + page_label,
@@ -1835,7 +1835,7 @@ def _register_handlers(app: Client):
             all_lines.append(f"{flag} {name} — **{range_str}** cr — {available} available")
             all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {range_str} cr ({available})",
-                callback_data=f"country:{cc}",
+                callback_data=f"country:{cc}", style=S.DEFAULT,
             )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_gn", "main_menu")
@@ -1887,12 +1887,12 @@ def _register_handlers(app: Client):
             assigned = clients.get_request_user(phone)
             if assigned:
                 all_buttons.append([
-                    InlineKeyboardButton(f"{em.OFFLINE} {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop")
+                    InlineKeyboardButton(f"{em.OFFLINE} {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop", style=S.DEFAULT)
                 ])
             else:
                 all_buttons.append([
                     InlineKeyboardButton(
-                        f"{em.ONLINE} {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}"
+                        f"{em.ONLINE} {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}", style=S.SUCCESS
                     )
                 ])
 
@@ -2028,7 +2028,7 @@ def _register_handlers(app: Client):
             f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
             f"{em.WARNING} Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.UNLOCK} Release Number", callback_data=f"release:{phone}")],
+                [InlineKeyboardButton(f"{em.UNLOCK} Release Number", callback_data=f"release:{phone}", style=S.DANGER)],
             ]),
         )
 
@@ -2105,14 +2105,14 @@ def _register_handlers(app: Client):
 
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_mh:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"pg_mh:{page - 1}", style=S.DEFAULT))
         if end < len(all_lines):
-            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_mh:{page + 1}"))
+            nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"pg_mh:{page + 1}", style=S.PRIMARY))
 
         footer = []
         if nav:
             footer.append(nav)
-        footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")])
+        footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)])
         page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
 
         await safe_edit(cq.message,
@@ -2129,10 +2129,10 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
         buttons = [
             [
-                InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans"),
-                InlineKeyboardButton(f"{em.COIN} Crypto (USDT)", callback_data="cr_plans"),
+                InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans", style=S.SUCCESS),
+                InlineKeyboardButton(f"{em.COIN} Crypto (USDT)", callback_data="cr_plans", style=S.PRIMARY),
             ],
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
         ]
         await safe_edit(cq.message,
             f"{em.CREDIT} **Buy Credits**\n\n"
@@ -2149,10 +2149,10 @@ def _register_handlers(app: Client):
         buttons = []
         for key, plan in CREDIT_PLANS.items():
             buttons.append([InlineKeyboardButton(
-                plan["label"], callback_data=f"rz_pay:{key}",
+                plan["label"], callback_data=f"rz_pay:{key}", style=S.DEFAULT,
             )])
-        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="rz_custom")])
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits")])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="rz_custom", style=S.DEFAULT)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.DEFAULT)])
         await safe_edit(cq.message,
             f"{em.MONEY} **Razorpay — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2177,8 +2177,8 @@ def _register_handlers(app: Client):
             )
 
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
-            [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")],
+            [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}", style=S.SUCCESS)],
+            [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)],
         ])
 
         try:
@@ -2234,10 +2234,10 @@ def _register_handlers(app: Client):
         for key, plan in CRYPTO_PLANS.items():
             buttons.append([InlineKeyboardButton(
                 f"{plan['credits']} Credits — {plan['amount_usdt']} USDT",
-                callback_data=f"cr_net:{key}",
+                callback_data=f"cr_net:{key}", style=S.DEFAULT,
             )])
-        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="cr_custom")])
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits")])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="cr_custom", style=S.DEFAULT)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.DEFAULT)])
         await safe_edit(cq.message,
             f"{em.COIN} **Crypto — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2248,10 +2248,10 @@ def _register_handlers(app: Client):
     async def cb_cr_net(_, cq: CallbackQuery):
         plan_key = cq.data.split(":", 1)[1]
         buttons = [
-            [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}")],
-            [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}")],
-            [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}")],
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans")],
+            [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}", style=S.DEFAULT)],
+            [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}", style=S.DEFAULT)],
+            [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}", style=S.DEFAULT)],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans", style=S.DEFAULT)],
         ]
         await safe_edit(cq.message,
             f"{em.GLOBE} **Select network for USDT deposit:**",
@@ -2299,7 +2299,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             text,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_pay")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_pay", style=S.DANGER)],
             ]),
         )
 
@@ -2319,7 +2319,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.SMS} **Enter the number of credits you want to purchase (minimum 10):**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)]
             ])
         )
 
@@ -2330,7 +2330,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.SMS} **Enter the number of credits you want to purchase (minimum 10):**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")]
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)]
             ])
         )
 
@@ -2619,7 +2619,7 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
             f"{em.FAQ} Add spaces or dots between digits.\n"
             "Example: `1 2 3 4 5` or `1.2.3.4.5`",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)],
             ]),
         )
     except FloodWait as e:
@@ -2700,10 +2700,10 @@ async def _handle_manual_country(message: Message, text: str):
         return
 
     buttons = [
-        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"cc_pick:{cc}")]
+        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"cc_pick:{cc}", style=S.DEFAULT)]
         for cc, name, flag in matches
     ]
-    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth")])
+    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_auth", style=S.DANGER)])
     await message.reply(
         f"{em.GLOBE} **Multiple matches found.** Pick one:",
         reply_markup=InlineKeyboardMarkup(buttons),
@@ -2787,26 +2787,26 @@ async def _handle_edit_num_country(message: Message, text: str):
             f"{em.MAIL} Email Added: **{email_str}**\n"
             f"{em.MONEY} Current Price: **{price}** credits",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}")],
+                [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}", style=S.PRIMARY)],
                 [
-                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1"),
-                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop"),
-                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1"),
+                    InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1", style=S.DEFAULT),
                 ],
                 [InlineKeyboardButton(
                     f"{em.MAIL} Email: {email_str} — Tap to toggle",
-                    callback_data=f"echg_em:{phone}",
+                    callback_data=f"echg_em:{phone}", style=S.DEFAULT,
                 )],
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
             ]),
         )
         return
 
     buttons = [
-        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"echg_ccpick:{cc}")]
+        [InlineKeyboardButton(f"{flag} {name}", callback_data=f"echg_ccpick:{cc}", style=S.DEFAULT)]
         for cc, name, flag in matches
     ]
-    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}")])
+    buttons.append([InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"editnum:{phone}", style=S.DANGER)])
     await message.reply(
         f"{em.GLOBE} **Multiple matches found.** Pick one:",
         reply_markup=InlineKeyboardMarkup(buttons),
@@ -2851,7 +2851,7 @@ async def _handle_edit_num_set_price(message: Message, text: str):
         f"{em.MAIL} Email: **{email_str}**\n"
         f"{em.MONEY} Price: **{price}** credits per OTP",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"editnum:{phone}")],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"editnum:{phone}", style=S.DEFAULT)],
         ]),
     )
 
@@ -3017,8 +3017,8 @@ async def _handle_rz_custom_amount(message: Message, text: str):
         return
 
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}")],
-        [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits")],
+        [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}", style=S.SUCCESS)],
+        [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)],
     ])
 
     try:
@@ -3064,10 +3064,10 @@ async def _handle_cr_custom_amount(message: Message, text: str):
     plan = get_crypto_plan(plan_key)
 
     buttons = [
-        [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}")],
-        [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}")],
-        [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}")],
-        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans")],
+        [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}", style=S.DEFAULT)],
+        [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}", style=S.DEFAULT)],
+        [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}", style=S.DEFAULT)],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans", style=S.DEFAULT)],
     ]
     await message.reply(
         f"{em.GLOBE} **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
