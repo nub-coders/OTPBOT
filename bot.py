@@ -146,12 +146,15 @@ def verified(func):
                     await db.create_user(user_id, tg_user.username, tg_user.first_name, role, referred_by=referrer_id)
                     if role == "admin":
                         return await func(client, update, *args, **kwargs)
-                    uname = tg_user.username or tg_user.first_name or str(user_id)
+                    display_name = tg_user.first_name or ""
+                    username = tg_user.username
+                    name_line = f"📛 Name: {display_name}"
+                    user_line = f"\n👤 Username: @{username}" if username else ""
                     ref_line = f"\n{em.LINK} Referred by: `{referrer_id}`" if referrer_id else ""
                     await alert(client,
                         f"{em.USER} **New User Joined**\n\n"
                         f"{em.ID_BADGE} ID: `{user_id}`\n"
-                        f"📛 Name: @{uname}{ref_line}"
+                        f"{name_line}{user_line}{ref_line}"
                     )
                 if not await db.is_verified(user_id):
                     url = await verification.create_verification_link(user_id)
@@ -308,12 +311,15 @@ def _register_handlers(app: Client):
                 referred_by=referrer_id,
             )
             if role != "admin":
-                uname = message.from_user.username or message.from_user.first_name or str(user_id)
+                display_name = message.from_user.first_name or ""
+                username = message.from_user.username
+                name_line = f"📛 Name: {display_name}"
+                user_line = f"\n👤 Username: @{username}" if username else ""
                 ref_line = f"\n{em.LINK} Referred by: `{referrer_id}`" if referrer_id else ""
                 await alert(app,
                     f"{em.USER} **New User Joined**\n\n"
                     f"{em.ID_BADGE} ID: `{user_id}`\n"
-                    f"📛 Name: @{uname}{ref_line}"
+                    f"{name_line}{user_line}{ref_line}"
                 )
                 if not VERIFICATION_ENABLED and referrer_id and REFERRAL_VERIFY_BONUS > 0:
                     referrer = await db.get_user(referrer_id)
@@ -325,7 +331,7 @@ def _register_handlers(app: Client):
                             await bot.send_message(
                                 referrer_id,
                                 f"{em.GIFT} **Referral Reward!**\n\n"
-                                f"Your referral **{uname}** joined the bot.\n"
+                                f"Your referral **{display_name or username or user_id}** joined the bot.\n"
                                 f"{em.MONEY} +{REFERRAL_VERIFY_BONUS} credits added!\n"
                                 f"{em.MONEY} Balance: **{new_balance}**",
                             )
@@ -854,7 +860,7 @@ def _register_handlers(app: Client):
             flag = get_country_flag(cc)
             for s in by_country[cc]:
                 phone = s["phone_number"]
-                status_icon = {"active": f"{em.ONLINE}", "sold": f"{em.OFFLINE}", "error": f"{em.WARNING}"}.get(s.get("status"), f"{em.IDLE}")
+                status_icon = {"active": f"{em.ONLINE}", "sold": f"{em.OFFLINE}", "error": f"{em.WARNING}", "unlisted": f"{em.BLOCKED}"}.get(s.get("status"), f"{em.IDLE}")
                 acc_year = s.get("account_year")
                 year_str = f" ~{acc_year}" if acc_year else ""
                 p = await db.get_session_price(s)
@@ -963,7 +969,11 @@ def _register_handlers(app: Client):
                 InlineKeyboardButton(f"{em.ERROR} Remove", callback_data=f"rm:{phone}"),
             ],
         ]
-        if status != "active":
+        if status == "active":
+            buttons.insert(0, [InlineKeyboardButton(
+                f"{em.OFFLINE} Unlist from Sale", callback_data=f"unlist:{phone}",
+            )])
+        elif status != "sold":
             buttons.insert(0, [InlineKeyboardButton(
                 f"{em.PENDING} Re-list for Sale", callback_data=f"relist:{phone}",
             )])
@@ -991,6 +1001,32 @@ def _register_handlers(app: Client):
         name = get_country_name(cc)
         await safe_edit(cq.message,
             f"{em.SUCCESS} `{phone}` ({flag} {name}) is now **active** and available for sale.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^unlist:"))
+    @verified
+    async def cb_unlist(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        phone = cq.data.split(":", 1)[1]
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer("Number not found.", show_alert=True)
+            return
+
+        await db.set_session_status(phone, "unlisted")
+        await cq.answer(f"{em.SUCCESS} Number unlisted!")
+
+        cc = session.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        name = get_country_name(cc)
+        await safe_edit(cq.message,
+            f"{em.OFFLINE} `{phone}` ({flag} {name}) is now **unlisted** and hidden from buyers.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}")],
             ]),
@@ -1725,10 +1761,22 @@ def _register_handlers(app: Client):
         ps = await db.get_payment_stats()
         active = len(clients.active_clients)
         assigned = len(clients.active_requests)
+        top_buyer = await db.top_buyer_24h()
+        top_ref = await db.top_referrer_24h()
 
         pay_lines = ""
         for method, info in ps.get("by_method", {}).items():
             pay_lines += f"\n  {method}: {info['count']} payments, {info['total']:.2f}"
+
+        daily_lines = "\n\n📊 **Last 24h:**"
+        if top_buyer:
+            daily_lines += f"\n  💰 Top buyer: @{top_buyer['name']} ({top_buyer['total']:.2f})"
+        else:
+            daily_lines += "\n  💰 Top buyer: —"
+        if top_ref:
+            daily_lines += f"\n  👥 Top referrer: @{top_ref['name']} ({top_ref['count']} refs)"
+        else:
+            daily_lines += "\n  👥 Top referrer: —"
 
         await safe_edit(cq.message,
             f"{em.STATS} **Statistics**\n\n"
@@ -1737,7 +1785,8 @@ def _register_handlers(app: Client):
             f"{em.ONLINE} Connected: {active}\n"
             f"{em.LINK} Assigned now: {assigned}\n"
             f"{em.MAIL} OTPs forwarded: {s['otps']}\n\n"
-            f"{em.CREDIT} **Payments:** {ps['total_payments']}{pay_lines}",
+            f"{em.CREDIT} **Payments:** {ps['total_payments']}{pay_lines}"
+            f"{daily_lines}",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -1766,13 +1815,17 @@ def _register_handlers(app: Client):
             )
             return
 
+        country_min = {}
+        for cc, items in by_country.items():
+            country_min[cc] = min(p for _, p in items)
+
         all_buttons = []
         all_lines = []
-        for cc in sorted(by_country.keys()):
+        for cc in sorted(by_country.keys(), key=lambda c: (country_min[c], c)):
             flag = get_country_flag(cc)
             name = get_country_name(cc)
             items = by_country[cc]
-            
+
             session_prices = [p for _, p in items]
             min_p = min(session_prices) if session_prices else 1
             max_p = max(session_prices) if session_prices else 1
@@ -1898,8 +1951,16 @@ def _register_handlers(app: Client):
             await clients.start_session(phone, session["session_string"])
         except Exception as e:
             log.error("Failed to start session %s: %s", phone, e)
+            await db.set_session_status(phone, "unlisted", str(e))
+            await alert(app,
+                f"{em.ALERT} **Session Connection Failed — Unlisted**\n\n"
+                f"{em.USER} Requested by: `{cq.from_user.id}`\n"
+                f"{em.PHONE} Number: `{phone}`\n"
+                f"{em.ERROR} Error: `{str(e)[:200]}`"
+            )
             await safe_edit(cq.message,
-                f"{em.ERROR} Failed to connect `{mask_phone(phone)}`: `{e}`",
+                f"{em.ERROR} Failed to connect `{mask_phone(phone)}`.\n\n"
+                "This has been reported to the admins.",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -1910,10 +1971,10 @@ def _register_handlers(app: Client):
             ok, err = await clients.check_password(phone, pwd)
             if not ok:
                 await clients.stop_session(phone)
-                await db.set_session_status(phone, "password_failed", err)
+                await db.set_session_status(phone, "unlisted", err)
                 masked = mask_phone(phone)
                 await alert(app,
-                    f"{em.ALERT} **Password Check Failed**\n\n"
+                    f"{em.ALERT} **Password Check Failed — Unlisted**\n\n"
                     f"{em.USER} Requested by: `{cq.from_user.id}`\n"
                     f"{em.PHONE} Number: `{phone}`\n"
                     f"{em.ERROR} Error: `{err[:200]}`\n"
