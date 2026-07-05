@@ -77,6 +77,7 @@ COUNTRY_CODES = [
     ("233", "GH", "Ghana", "\U0001f1ec\U0001f1ed"),
     ("245", "GW", "Guinea-Bissau", "\U0001f1ec\U0001f1fc"),
     ("30", "GR", "Greece", "\U0001f1ec\U0001f1f7"),
+    ("299", "GL", "Greenland", "\U0001f1ec\U0001f1f1"),
     ("852", "HK", "Hong Kong", "\U0001f1ed\U0001f1f0"),
     ("36", "HU", "Hungary", "\U0001f1ed\U0001f1fa"),
     ("354", "IS", "Iceland", "\U0001f1ee\U0001f1f8"),

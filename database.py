@@ -506,3 +506,33 @@ async def mark_referral_purchase_rewarded(telegram_id: int):
 async def is_referral_purchase_rewarded(telegram_id: int) -> bool:
     user = await get_user(telegram_id)
     return user is not None and user.get("referral_purchase_rewarded", False)
+
+
+async def top_buyer_24h():
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    pipeline = [
+        {"$match": {"created_at": {"$gte": since}}},
+        {"$group": {"_id": "$user_id", "total": {"$sum": "$amount"}}},
+        {"$sort": {"total": -1}},
+        {"$limit": 1},
+    ]
+    async for doc in db.payments.aggregate(pipeline):
+        user = await get_user(doc["_id"])
+        name = (user.get("username") or user.get("first_name") or str(doc["_id"])) if user else str(doc["_id"])
+        return {"name": name, "user_id": doc["_id"], "total": doc["total"]}
+    return None
+
+
+async def top_referrer_24h():
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    pipeline = [
+        {"$match": {"referred_by": {"$ne": None}, "created_at": {"$gte": since}}},
+        {"$group": {"_id": "$referred_by", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 1},
+    ]
+    async for doc in db.users.aggregate(pipeline):
+        user = await get_user(doc["_id"])
+        name = (user.get("username") or user.get("first_name") or str(doc["_id"])) if user else str(doc["_id"])
+        return {"name": name, "user_id": doc["_id"], "count": doc["count"]}
+    return None

@@ -19,62 +19,43 @@ VERIFY_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Human Verification</title>
+<title>Verify</title>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#0e1621;color:#e4e6eb;display:flex;align-items:center;justify-content:center;
-min-height:100vh;padding:20px}
-.card{background:#1b2533;border-radius:16px;padding:40px 32px;max-width:420px;
-width:100%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-h1{font-size:1.5rem;margin-bottom:8px}
-p{color:#8b9bb4;font-size:.95rem;margin-bottom:24px}
-.cf-turnstile{display:flex;justify-content:center;margin-bottom:24px}
-.status{padding:12px 20px;border-radius:10px;font-size:.95rem;display:none}
-.status.ok{background:#1a3a2a;color:#4ade80;display:block}
-.status.err{background:#3a1a1a;color:#f87171;display:block}
-.status.wait{background:#2a2a1a;color:#facc15;display:block}
-.expired{color:#f87171;font-size:1.1rem;margin-top:16px}
-.btn{display:inline-block;margin-top:16px;padding:12px 28px;border-radius:10px;
-background:#2d6cdf;color:#fff;text-decoration:none;font-weight:600;font-size:.95rem;
-transition:background .2s}.btn:hover{background:#3b7bf0}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#ccc;font-family:monospace;font-size:14px;
+min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.wrap{max-width:360px;width:100%}
+h1{font-size:16px;font-weight:normal;color:#fff;margin-bottom:6px}
+p{color:#777;margin-bottom:20px}
+.cf-turnstile{margin-bottom:20px}
+#status{padding:8px 0;display:none}
+#status.ok{color:#6f6;display:block}
+#status.err{color:#f66;display:block}
+#status.wait{color:#cc0;display:block}
+a.back{color:#6af;text-decoration:none;border-bottom:1px solid #6af}
+a.back:hover{color:#fff}
 </style>
 </head>
 <body>
-<div class="card" id="card">
-<h1>Human Verification</h1>
-<p>Complete the challenge below to access the bot.</p>
+<div class="wrap">
+<h1>verify you're human</h1>
+<p>complete the check below.</p>
 <div class="cf-turnstile" data-sitekey="{{SITE_KEY}}" data-callback="onToken" data-theme="dark"></div>
 <div id="status"></div>
 </div>
 <script>
-const vtoken = "{{VTOKEN}}";
-async function onToken(cfToken) {
-  const el = document.getElementById("status");
-  el.className = "status wait";
-  el.textContent = "Verifying...";
-  el.style.display = "block";
-  try {
-    const r = await fetch("/api/verify", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({vtoken, token: cfToken})
-    });
-    const d = await r.json();
-    if (d.ok) {
-      el.className = "status ok";
-      el.innerHTML = 'Verified! <a class="btn" href="https://t.me/{{BOT_USERNAME}}">Return to Bot</a>';
-    } else {
-      el.className = "status err";
-      el.textContent = d.error || "Verification failed. Try again.";
-      turnstile.reset();
-    }
-  } catch {
-    el.className = "status err";
-    el.textContent = "Network error. Try again.";
-    turnstile.reset();
-  }
+const vtoken="{{VTOKEN}}";
+async function onToken(cfToken){
+  const el=document.getElementById("status");
+  el.className="status wait";el.textContent="checking...";el.style.display="block";
+  try{
+    const r=await fetch("/api/verify",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({vtoken,token:cfToken})});
+    const d=await r.json();
+    if(d.ok){el.className="status ok";el.innerHTML='done. <a class="back" href="https://t.me/{{BOT_USERNAME}}">back to bot</a>';}
+    else{el.className="status err";el.textContent=d.error||"failed. try again.";turnstile.reset();}
+  }catch{el.className="status err";el.textContent="network error.";turnstile.reset();}
 }
 </script>
 </body>
@@ -86,22 +67,20 @@ EXPIRED_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Link Expired</title>
+<title>Expired</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#0e1621;color:#e4e6eb;display:flex;align-items:center;justify-content:center;
-min-height:100vh;padding:20px}
-.card{background:#1b2533;border-radius:16px;padding:40px 32px;max-width:420px;
-width:100%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-h1{font-size:1.5rem;margin-bottom:12px;color:#f87171}
-p{color:#8b9bb4;font-size:.95rem}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#ccc;font-family:monospace;font-size:14px;
+min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.wrap{max-width:360px;width:100%}
+h1{font-size:16px;font-weight:normal;color:#f66;margin-bottom:6px}
+p{color:#777}
 </style>
 </head>
 <body>
-<div class="card">
-<h1>Link Expired</h1>
-<p>This verification link has expired or was already used.<br>Go back to the bot and tap <b>Verify</b> to get a new link.</p>
+<div class="wrap">
+<h1>link expired</h1>
+<p>this link was already used or expired. go back to the bot and tap verify for a new one.</p>
 </div>
 </body>
 </html>
