@@ -230,6 +230,8 @@ SORT         = '🔼'
 HOME         = '🏠'
 HELP         = '❓'
 FAQ          = '💡'
+TUTORIAL     = '📖'
+
 
 # COUNTRIES & GEOGRAPHY
 GLOBE        = '🌐'

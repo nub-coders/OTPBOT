@@ -462,8 +462,11 @@ async def get_session_price(session: dict) -> int | None:
 
 # ── Referrals ──
 
-async def get_referral_count(telegram_id: int) -> int:
-    return await db.users.count_documents({"referred_by": telegram_id})
+async def get_referral_count(telegram_id: int, verified_only: bool = False) -> int:
+    query = {"referred_by": telegram_id}
+    if verified_only:
+        query["verified"] = True
+    return await db.users.count_documents(query)
 
 
 async def get_referral_earned(telegram_id: int) -> int:

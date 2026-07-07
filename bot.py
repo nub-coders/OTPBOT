@@ -197,7 +197,10 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.DEFAULT),
         ],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
-        [InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.DEFAULT)],
+        [
+            InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.TUTORIAL} How to Use", callback_data="how_to_use", style=S.DEFAULT),
+        ],
         [
             InlineKeyboardButton(f"{em.PHONE} Support", callback_data="support", style=S.DEFAULT),
             InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
@@ -363,11 +366,26 @@ def _register_handlers(app: Client):
         is_adm = await db.is_admin(cq.from_user.id)
         credits = await db.get_credits(cq.from_user.id)
         credit_line = f"\n{em.MONEY} Credits: **{credits}**"
-        await safe_edit(cq.message,
-            f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
-            f"Buy credits, rent a number, and receive OTPs instantly.{credit_line}",
-            reply_markup=main_menu_kb(is_adm),
-        )
+        if cq.message.video or cq.message.photo:
+            try:
+                await cq.message.delete()
+            except Exception:
+                pass
+            await app.send_message(
+                chat_id=cq.from_user.id,
+                text=(
+                    f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
+                    f"Buy credits, rent a number, and receive OTPs instantly.{credit_line}"
+                ),
+                reply_markup=main_menu_kb(is_adm),
+            )
+        else:
+            await safe_edit(cq.message,
+                f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
+                f"Buy credits, rent a number, and receive OTPs instantly.{credit_line}",
+                reply_markup=main_menu_kb(is_adm),
+            )
+
 
     @app.on_callback_query(filters.regex("^support$"))
     @verified
@@ -387,7 +405,7 @@ def _register_handlers(app: Client):
         user_id = cq.from_user.id
         bot_me = await app.get_me()
         ref_link = f"https://t.me/{bot_me.username}?start=ref_{user_id}"
-        ref_count = await db.get_referral_count(user_id)
+        ref_count = await db.get_referral_count(user_id, verified_only=VERIFICATION_ENABLED)
         ref_earned = await db.get_referral_earned(user_id)
 
         await safe_edit(cq.message,
@@ -1660,7 +1678,7 @@ def _register_handlers(app: Client):
         verified_status = user.get("verified", False)
         referred_by = user.get("referred_by")
         ref_earned = user.get("referral_earned", 0)
-        ref_count = await db.get_referral_count(uid)
+        ref_count = await db.get_referral_count(uid, verified_only=VERIFICATION_ENABLED)
         created = user.get("created_at")
         created_str = created.strftime("%Y-%m-%d %H:%M UTC") if created else "—"
 
@@ -2383,6 +2401,61 @@ def _register_handlers(app: Client):
             _build_help_text(is_adm),
             reply_markup=back_kb(),
         )
+
+    @app.on_callback_query(filters.regex("^how_to_use$"))
+    @verified
+    async def cb_how_to_use(_, cq: CallbackQuery):
+        try:
+            await cq.message.delete()
+        except Exception:
+            pass
+
+        caption = (
+            f"🎬 **How to Use OTP Bot — Tutorial Video**\n\n"
+            f"Here is a quick guide on how to use the bot:\n"
+            f"1️⃣ **Top Up**: Buy credits via UPI or Crypto.\n"
+            f"2️⃣ **Rent a Number**: Go to **Get Number**, select country, and rent.\n"
+            f"3️⃣ **Receive OTP**: The bot will display incoming OTP messages instantly."
+        )
+
+        video_sent = False
+        try:
+            msg = await app.get_messages("Vault_store_News", 222)
+            if msg and msg.video:
+                await app.send_video(
+                    chat_id=cq.from_user.id,
+                    video=msg.video.file_id,
+                    caption=caption,
+                    reply_markup=back_kb("main_menu"),
+                )
+                video_sent = True
+        except Exception as e:
+            log.warning("Failed to fetch video from channel Vault_store_News/222: %s", e)
+
+        if not video_sent:
+            import os
+            local_video = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_2026-07-07_17-55-47.mp4")
+            if os.path.exists(local_video):
+                try:
+                    await app.send_video(
+                        chat_id=cq.from_user.id,
+                        video=local_video,
+                        caption=caption,
+                        reply_markup=back_kb("main_menu"),
+                    )
+                    video_sent = True
+                except Exception as e:
+                    log.error("Failed to send local fallback video: %s", e)
+            else:
+                log.error("Local fallback video file does not exist: %s", local_video)
+
+        if not video_sent:
+            await app.send_message(
+                chat_id=cq.from_user.id,
+                text=caption + "\n\n*(Error loading tutorial video, showing text only)*",
+                reply_markup=back_kb("main_menu"),
+            )
+
 
     @app.on_message(filters.command("cancel") & filters.private)
     @verified
