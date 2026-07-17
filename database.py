@@ -394,7 +394,7 @@ async def save_payment(user_id: int, method: str, plan: str, amount: float, curr
         "user_id": user_id,
         "method": method,
         "plan": plan,
-        "amount": amount,
+        "amount": float(amount),  # ensure BSON double, not Decimal128
         "currency": currency,
         "ref_id": ref_id,
         "created_at": datetime.now(timezone.utc),

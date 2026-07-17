@@ -1784,7 +1784,12 @@ def _register_handlers(app: Client):
 
         pay_lines = ""
         for method, info in ps.get("by_method", {}).items():
-            pay_lines += f"\n  {method}: {info['count']} payments, {info['total']:.2f}"
+            total = info["total"]
+            if method == "crypto_usdt":
+                total_inr = total * USDT_TO_INR
+                pay_lines += f"\n  {method}: {info['count']} payments, ₹{total_inr:.2f} ({total:.2f} USDT)"
+            else:
+                pay_lines += f"\n  {method}: {info['count']} payments, ₹{total:.2f}"
 
         daily_lines = "\n\n📊 **Last 24h:**"
         if top_buyer:
