@@ -1,6 +1,6 @@
 import motor.motor_asyncio
 from datetime import datetime, timezone, timedelta
-from config import MONGODB_URI, ADMIN_IDS
+from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client.otpbot
@@ -177,6 +177,13 @@ async def get_active_sessions_by_country(country_code: str):
 
 
 async def remove_session(phone_number: str):
+    # Archive before deleting so removals can be counted in stats.
+    session = await db.sessions.find_one({"phone_number": phone_number})
+    if session:
+        session["removed_at"] = datetime.now(timezone.utc)
+        session.pop("_id", None)
+        session.pop("session_string", None)  # don't retain the credential
+        await db.removed_sessions.insert_one(session)
     await db.sessions.delete_one({"phone_number": phone_number})
 
 
@@ -385,6 +392,136 @@ async def get_stats():
     sessions = await db.sessions.count_documents({"status": "active"})
     otps = await db.otps.count_documents({})
     return {"users": users, "sessions": sessions, "otps": otps}
+
+
+async def get_extended_stats():
+    """Rich stats with 24h / 7d / 30d / all-time breakdowns for the admin panel."""
+    now = datetime.now(timezone.utc)
+    windows = {
+        "24h": now - timedelta(hours=24),
+        "7d": now - timedelta(days=7),
+        "30d": now - timedelta(days=30),
+    }
+
+    async def counts(coll, field, extra=None):
+        base = dict(extra or {})
+        out = {"all": await coll.count_documents(base)}
+        for label, since in windows.items():
+            out[label] = await coll.count_documents({**base, field: {"$gte": since}})
+        return out
+
+    def merge(a, b):
+        return {k: a[k] + b[k] for k in a}
+
+    # Numbers added (sessions created), sold, removed
+    added = await counts(db.sessions, "created_at")
+    # Sold: count from sessions still marked sold + any that were later removed
+    sold_live = await counts(db.sessions, "sold_at", {"status": "sold"})
+    sold_removed = await counts(db.removed_sessions, "sold_at", {"status": "sold"})
+    sold = merge(sold_live, sold_removed)
+    removed = await counts(db.removed_sessions, "removed_at")
+
+    # Transactions (payments) and new users
+    transactions = await counts(db.payments, "created_at")
+    new_users = await counts(db.users, "created_at")
+    otps = await counts(db.otps, "created_at")
+
+    # Auth failures / auto-unlists
+    auth_failures = await counts(db.auth_failures, "created_at")
+
+    # Sell-through: sold / added, per window
+    sell_through = {}
+    for k in ["24h", "7d", "30d", "all"]:
+        a = added[k]
+        sell_through[k] = (sold[k] / a * 100) if a else 0.0
+
+    # Average hours from added to sold (over sold sessions, live + removed)
+    avg_time_to_sell = None
+    tts_pipeline = [
+        {"$match": {"status": "sold", "sold_at": {"$exists": True}, "created_at": {"$exists": True}}},
+        {"$project": {"secs": {"$subtract": ["$sold_at", "$created_at"]}}},
+        {"$group": {"_id": None, "avg": {"$avg": "$secs"}}},
+    ]
+    total_avg = []
+    for coll in (db.sessions, db.removed_sessions):
+        async for doc in coll.aggregate(tts_pipeline):
+            if doc.get("avg") is not None:
+                total_avg.append(doc["avg"])
+    if total_avg:
+        avg_time_to_sell = (sum(total_avg) / len(total_avg)) / 1000 / 3600  # ms -> hours
+
+    # Funnel: total users -> verified -> made a purchase (all-time)
+    total_users = new_users["all"]
+    verified_users = await db.users.count_documents({"verified": True})
+    buyers = len(await db.payments.distinct("user_id"))
+
+    # Inventory breakdown by status
+    inventory = {}
+    async for doc in db.sessions.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}]):
+        inventory[doc["_id"] or "unknown"] = doc["n"]
+
+    # Total credits currently held by users (outstanding liability)
+    outstanding = 0
+    async for doc in db.users.aggregate([{"$group": {"_id": None, "c": {"$sum": "$credits"}}}]):
+        outstanding = doc["c"]
+
+    return {
+        "added": added,
+        "sold": sold,
+        "removed": removed,
+        "transactions": transactions,
+        "new_users": new_users,
+        "otps": otps,
+        "auth_failures": auth_failures,
+        "sell_through": sell_through,
+        "avg_time_to_sell": avg_time_to_sell,
+        "funnel": {"users": total_users, "verified": verified_users, "buyers": buyers},
+        "inventory": inventory,
+        "outstanding_credits": outstanding,
+    }
+
+
+async def ensure_indexes():
+    """Create indexes used by the stats queries. Idempotent — safe to call on every startup."""
+    await db.auth_failures.create_index("created_at")
+    await db.removed_sessions.create_index("removed_at")
+    await db.removed_sessions.create_index("sold_at")
+
+
+async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
+    """Record an auth failure / auto-unlist event so it can be counted in stats."""
+    await db.auth_failures.insert_one({
+        "phone_number": phone_number,
+        "kind": kind,  # e.g. "connect" or "password"
+        "reason": (reason or "")[:300],
+        "requested_by": requested_by,
+        "created_at": datetime.now(timezone.utc),
+    })
+
+
+async def get_revenue_stats():
+    """Revenue totals split by all-time and last 24h, in INR-equivalent."""
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    async def revenue(match):
+        pipeline = [
+            {"$match": match},
+            {"$group": {"_id": "$method", "count": {"$sum": 1}, "total": {"$sum": "$amount"}}},
+        ]
+        count = 0
+        total_inr = 0.0
+        async for doc in db.payments.aggregate(pipeline):
+            count += doc["count"]
+            if doc["_id"] == "crypto_usdt":
+                total_inr += doc["total"] * USDT_TO_INR
+            else:
+                total_inr += doc["total"]
+        return {"count": count, "inr": total_inr}
+
+    return {
+        "all": await revenue({}),
+        "24h": await revenue({"created_at": {"$gte": since}}),
+    }
 
 
 # ── Payments ──
