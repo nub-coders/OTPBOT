@@ -1777,10 +1777,16 @@ def _register_handlers(app: Client):
 
         s = await db.get_stats()
         ps = await db.get_payment_stats()
+        ext = await db.get_extended_stats()
+        rev = await db.get_revenue_stats()
         active = len(clients.active_clients)
         assigned = len(clients.active_requests)
         top_buyer = await db.top_buyer_24h()
         top_ref = await db.top_referrer_24h()
+
+        def d(metric):
+            # "24h | 7d | 30d | all" formatter for a windowed metric dict
+            return f"{metric['24h']} | {metric['7d']} | {metric['30d']} | {metric['all']}"
 
         pay_lines = ""
         for method, info in ps.get("by_method", {}).items():
@@ -1791,25 +1797,71 @@ def _register_handlers(app: Client):
             else:
                 pay_lines += f"\n  {method}: {info['count']} payments, ₹{total:.2f}"
 
-        daily_lines = "\n\n📊 **Last 24h:**"
+        # Inventory breakdown by status
+        inv = ext["inventory"]
+        inv_line = " | ".join(f"{k}: {v}" for k, v in sorted(inv.items())) or "—"
+
+        activity = (
+            f"\n\n{em.CALENDAR} **Activity — 24h | 7d | 30d | all:**\n"
+            f"  {em.ADD} Numbers added: {d(ext['added'])}\n"
+            f"  {em.MONEY} Numbers sold: {d(ext['sold'])}\n"
+            f"  {em.DELETE} Numbers removed: {d(ext['removed'])}\n"
+            f"  {em.CREDIT} Transactions: {d(ext['transactions'])}\n"
+            f"  {em.NEW_USER} New users: {d(ext['new_users'])}\n"
+            f"  {em.MAIL} OTPs forwarded: {d(ext['otps'])}\n"
+            f"  {em.WARNING} Auth failures: {d(ext['auth_failures'])}"
+        )
+
+        st = ext["sell_through"]
+        tts = ext["avg_time_to_sell"]
+        tts_str = f"{tts:.1f}h" if tts is not None else "—"
+        performance = (
+            f"\n\n{em.TRENDING_UP} **Performance:**\n"
+            f"  Sell-through (24h/7d/30d/all): "
+            f"{st['24h']:.0f}% | {st['7d']:.0f}% | {st['30d']:.0f}% | {st['all']:.0f}%\n"
+            f"  Avg time-to-sell: {tts_str}"
+        )
+
+        fn = ext["funnel"]
+        v_pct = (fn["verified"] / fn["users"] * 100) if fn["users"] else 0
+        b_pct = (fn["buyers"] / fn["users"] * 100) if fn["users"] else 0
+        funnel = (
+            f"\n\n{em.USERS} **Funnel (all-time):**\n"
+            f"  Users: {fn['users']} → Verified: {fn['verified']} ({v_pct:.0f}%) "
+            f"→ Buyers: {fn['buyers']} ({b_pct:.0f}%)"
+        )
+
+        revenue = (
+            f"\n\n{em.BANK} **Revenue (INR-equiv):**\n"
+            f"  Last 24h: ₹{rev['24h']['inr']:.2f} ({rev['24h']['count']} txns)\n"
+            f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)"
+        )
+
+        top_lines = f"\n\n{em.FIRE} **Leaderboard (24h):**"
         if top_buyer:
-            daily_lines += f"\n  💰 Top buyer: @{top_buyer['name']} ({top_buyer['total']:.2f})"
+            top_lines += f"\n  {em.MONEY} Top buyer: @{top_buyer['name']} ({top_buyer['total']:.2f})"
         else:
-            daily_lines += "\n  💰 Top buyer: —"
+            top_lines += f"\n  {em.MONEY} Top buyer: —"
         if top_ref:
-            daily_lines += f"\n  👥 Top referrer: @{top_ref['name']} ({top_ref['count']} refs)"
+            top_lines += f"\n  {em.USERS} Top referrer: @{top_ref['name']} ({top_ref['count']} refs)"
         else:
-            daily_lines += "\n  👥 Top referrer: —"
+            top_lines += f"\n  {em.USERS} Top referrer: —"
 
         await safe_edit(cq.message,
             f"{em.STATS} **Statistics**\n\n"
             f"{em.USERS} Users: {s['users']}\n"
-            f"{em.PHONE} Numbers (DB): {s['sessions']}\n"
+            f"{em.PHONE} Numbers (active): {s['sessions']}\n"
             f"{em.ONLINE} Connected: {active}\n"
             f"{em.LINK} Assigned now: {assigned}\n"
-            f"{em.MAIL} OTPs forwarded: {s['otps']}\n\n"
-            f"{em.CREDIT} **Payments:** {ps['total_payments']}{pay_lines}"
-            f"{daily_lines}",
+            f"{em.MAIL} OTPs forwarded: {s['otps']}\n"
+            f"{em.WALLET} Outstanding credits: {ext['outstanding_credits']}\n"
+            f"{em.PHONE} Inventory: {inv_line}"
+            f"{activity}"
+            f"{performance}"
+            f"{funnel}"
+            f"{revenue}\n\n"
+            f"{em.CREDIT} **Payments by method:** {ps['total_payments']}{pay_lines}"
+            f"{top_lines}",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -1975,6 +2027,7 @@ def _register_handlers(app: Client):
         except Exception as e:
             log.error("Failed to start session %s: %s", phone, e)
             await db.set_session_status(phone, "unlisted", str(e))
+            await db.log_auth_failure(phone, str(e), kind="connect", requested_by=cq.from_user.id)
             await alert(app,
                 f"{em.ALERT} **Session Connection Failed — Unlisted**\n\n"
                 f"{em.USER} Requested by: `{cq.from_user.id}`\n"
@@ -1995,6 +2048,7 @@ def _register_handlers(app: Client):
             if not ok:
                 await clients.stop_session(phone)
                 await db.set_session_status(phone, "unlisted", err)
+                await db.log_auth_failure(phone, err, kind="password", requested_by=cq.from_user.id)
                 masked = mask_phone(phone)
                 await alert(app,
                     f"{em.ALERT} **Password Check Failed — Unlisted**\n\n"

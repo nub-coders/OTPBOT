@@ -186,6 +186,7 @@ async def payment_recovery_processor(bot):
 async def main():
     from bot import create_bot
     import clients
+    import database as db
     from config import TURNSTILE_SITE_KEY, ENABLE_VERIFICATION
     import verification
 
@@ -194,6 +195,9 @@ async def main():
 
     await bot.start()
     log.info("Bot started.")
+
+    await db.ensure_indexes()
+    log.info("Database indexes ensured.")
 
     if ENABLE_VERIFICATION and TURNSTILE_SITE_KEY:
         await verification.start_server()
