@@ -121,6 +121,68 @@ async def deduct_credits(telegram_id: int, amount: int) -> bool:
     return result.modified_count > 0
 
 
+# ── Discount Offers ──
+
+async def get_active_offer(telegram_id: int) -> dict | None:
+    """Return the user's discount offer if one is currently active, else None."""
+    user = await get_user(telegram_id)
+    if not user:
+        return None
+    offer = user.get("offer")
+    if not offer:
+        return None
+    expires_at = offer.get("expires_at")
+    if not expires_at:
+        return None
+    # Mongo returns naive UTC datetimes; compare in UTC.
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return None
+    return offer
+
+
+async def can_grant_offer(telegram_id: int) -> bool:
+    """A new offer can be granted only if none is active and the cooldown
+    since the last grant has elapsed."""
+    from config import OFFER_COOLDOWN_HOURS
+
+    user = await get_user(telegram_id)
+    if not user:
+        return False
+    offer = user.get("offer")
+    if not offer:
+        return True
+    now = datetime.now(timezone.utc)
+    expires_at = offer.get("expires_at")
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at > now:
+            return False  # an offer is still active
+    granted_at = offer.get("granted_at")
+    if granted_at is not None:
+        if granted_at.tzinfo is None:
+            granted_at = granted_at.replace(tzinfo=timezone.utc)
+        if now - granted_at < timedelta(hours=OFFER_COOLDOWN_HOURS):
+            return False  # still within cooldown
+    return True
+
+
+async def set_offer(telegram_id: int, credits: int, duration_hours: float):
+    now = datetime.now(timezone.utc)
+    offer = {
+        "credits": credits,
+        "granted_at": now,
+        "expires_at": now + timedelta(hours=duration_hours),
+    }
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"offer": offer}},
+    )
+    return offer
+
+
 # ── Country Pricing (Removed) ──
 
 

@@ -20,7 +20,7 @@ from pyrogram.errors import (
     MessageNotModified,
 )
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS
 import database as db
 import clients
 import payments
@@ -67,6 +67,72 @@ def get_crypto_plan(plan_key: str) -> dict | None:
         except Exception:
             return None
     return CRYPTO_PLANS.get(plan_key)
+
+
+def _random_discount_credits() -> int:
+    """Pick a random flat credit discount biased toward the minimum.
+
+    Squaring a [0,1) random draw skews the result low, so most users land
+    near OFFER_MIN_CREDITS and only a few reach OFFER_MAX_CREDITS.
+    """
+    import random
+
+    lo, hi = OFFER_MIN_CREDITS, OFFER_MAX_CREDITS
+    if hi <= lo:
+        return lo
+    span = hi - lo
+    biased = random.random() ** 2  # skew toward 0
+    return lo + int(round(biased * span))
+
+
+def _random_offer_hours() -> float:
+    import random
+
+    return random.uniform(OFFER_MIN_HOURS, OFFER_MAX_HOURS)
+
+
+def apply_discount(price: int, offer: dict | None) -> int:
+    """Return the effective per-OTP price after applying an active offer.
+
+    Discount is a flat number of credits off. If the discount meets or exceeds
+    the price the number is free (0 credits); the result never goes negative.
+    """
+    if not offer or not price:
+        return price
+    credits_off = offer.get("credits", 0)
+    if credits_off <= 0:
+        return price
+    return max(0, price - credits_off)
+
+
+async def maybe_grant_offer(telegram_id: int) -> dict | None:
+    """Grant a new random discount offer if eligible; return the active offer
+    (newly granted or already running), or None."""
+    active = await db.get_active_offer(telegram_id)
+    if active:
+        return active
+    if not await db.can_grant_offer(telegram_id):
+        return None
+    credits = _random_discount_credits()
+    hours = _random_offer_hours()
+    return await db.set_offer(telegram_id, credits, hours)
+
+
+def offer_banner(offer: dict | None) -> str:
+    """A short banner line describing the active offer, or empty string."""
+    if not offer:
+        return ""
+    from datetime import datetime, timezone
+    expires_at = offer.get("expires_at")
+    mins_left = ""
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        delta = expires_at - datetime.now(timezone.utc)
+        total_min = max(0, int(delta.total_seconds() // 60))
+        h, m = divmod(total_min, 60)
+        mins_left = f" • ends in {h}h {m}m" if h else f" • ends in {m}m"
+    return f"{em.GIFT} <u>**Limited-time offer: {offer.get('credits', 0)} credits OFF{mins_left}**</u>"
 
 
 async def safe_edit(message, text, **kwargs):
@@ -193,7 +259,7 @@ def create_bot() -> Client:
 def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton(f"{em.PHONE} Get Number", callback_data="get_number", style=S.PRIMARY),
+            InlineKeyboardButton(f"{em.PHONE} Buy Account", callback_data="get_number", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.DEFAULT),
         ],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
@@ -352,11 +418,38 @@ def _register_handlers(app: Client):
 
         is_adm = await db.is_admin(user_id)
         credits = await db.get_credits(user_id)
-        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
+
+        fname = (message.from_user.first_name or "there").strip()
+        is_returning = user is not None  # user was fetched above; None means brand new
+
+        offer_block = ""
+        if not is_adm:
+            offer = await maybe_grant_offer(user_id)
+            banner = offer_banner(offer)
+            if banner:
+                offer_block = (
+                    f"\n\n<blockquote>"
+                    f"{banner}\n"
+                    f"{em.ZAP} Auto-applied on every account you buy — grab it before it's gone!"
+                    f"</blockquote>"
+                )
+
+        greeting = (
+            f"{em.WAVE} Welcome back, **{fname}**!" if is_returning
+            else f"{em.SPARK} Hey **{fname}**, welcome aboard! {em.ROCKET}"
+        )
+
         await message.reply(
-            f"{em.WAVE} **Welcome to OTP Bot!**\n\n"
-            "Get OTP codes from monitored Telegram numbers.\n"
-            f"Choose an option below:{credit_line}",
+            f"{greeting}\n"
+            f"{em.STAR} **OTP Bot** — buy ready Telegram accounts, delivered instantly.\n\n"
+            f"<blockquote>"
+            f"{em.PHONE} **Buy Account** — pick a number and own it in seconds\n"
+            f"{em.OTP} **Instant login OTP** — the code lands the moment it arrives\n"
+            f"{em.GLOBE} **Global** — accounts across many countries\n"
+            f"{em.GIFT} **Referrals & offers** — earn and save as you go"
+            f"</blockquote>\n\n"
+            f"{em.MONEY} Your balance: **{credits}** credits{offer_block}\n\n"
+            f"{em.IDEA} Pick an option below to begin:",
             reply_markup=main_menu_kb(is_adm),
         )
 
@@ -375,14 +468,14 @@ def _register_handlers(app: Client):
                 chat_id=cq.from_user.id,
                 text=(
                     f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
-                    f"Buy credits, rent a number, and receive OTPs instantly.{credit_line}"
+                    f"Buy credits, grab a Telegram account, and get its login OTP instantly.{credit_line}"
                 ),
                 reply_markup=main_menu_kb(is_adm),
             )
         else:
             await safe_edit(cq.message,
                 f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
-                f"Buy credits, rent a number, and receive OTPs instantly.{credit_line}",
+                f"Buy credits, grab a Telegram account, and get its login OTP instantly.{credit_line}",
                 reply_markup=main_menu_kb(is_adm),
             )
 
@@ -394,7 +487,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.PHONE} **Support**\n\n"
             f"Having issues? Contact any of our support agents:\n\n"
-            f"{lines}\n\n"
+            f"<blockquote>{lines}</blockquote>\n\n"
             "We're here to help with purchases, login issues, or any questions.",
             reply_markup=back_kb(),
         )
@@ -411,8 +504,10 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.GIFT} **Refer & Earn**\n\n"
             f"Share your referral link and earn credits!\n\n"
+            f"<blockquote>"
             f"{em.SHIELD} **{REFERRAL_VERIFY_BONUS} credits** when your friend {'verifies' if VERIFICATION_ENABLED else 'joins'}\n"
-            f"{em.CREDIT} **{REFERRAL_BONUS} credits** on their first purchase\n\n"
+            f"{em.CREDIT} **{REFERRAL_BONUS} credits** on their first purchase"
+            f"</blockquote>\n\n"
             f"{em.LINK} **Your link:**\n`{ref_link}`\n\n"
             f"{em.USERS} Referrals: **{ref_count}**\n"
             f"{em.MONEY} Total earned: **{ref_earned}** credits",
@@ -966,13 +1061,16 @@ def _register_handlers(app: Client):
         email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
         info = (
+            f"{em.PHONE} **Number Details**\n\n"
+            f"<blockquote>"
             f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"{em.STATS} Status: **{status}**\n"
             f"{em.MONEY} Price: **{price_str}**\n"
             f"{age_line}"
             f"{email_line}"
-            f"{em.PASSWORD} Password: {'`' + pwd + '`' if pwd else 'Not set'}\n"
+            f"{em.PASSWORD} Password: {'`' + pwd + '`' if pwd else 'Not set'}"
+            f"</blockquote>\n"
         )
         if error:
             info += f"❗ Last error: `{error[:120]}`\n"
@@ -1130,13 +1228,15 @@ def _register_handlers(app: Client):
 
         info = (
             f"{em.OFFLINE} **Sold Number**\n\n"
+            f"<blockquote>"
             f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"{em.MONEY} **Price Paid:** {sold_price} credits\n"
             f"{buyer_line}"
             f"{sold_time}"
             f"{age_line}"
-            f"{email_line}"
+            f"{email_line}".rstrip("\n")
+            + "</blockquote>"
         )
 
         await safe_edit(cq.message, info,
@@ -1689,6 +1789,7 @@ def _register_handlers(app: Client):
 
         await message.reply(
             f"{role_icon} **User Info**\n\n"
+            f"<blockquote>"
             f"{em.ID_BADGE} ID: `{uid}`\n"
             f"📛 Name: **{fname}**\n"
             f"{em.USER} Username: @{uname}\n"
@@ -1696,7 +1797,8 @@ def _register_handlers(app: Client):
             f"{verified_icon} Verified: **{'Yes' if verified_status else 'No'}**\n"
             f"{em.MONEY} Credits: **{credits}**\n"
             f"{em.CALENDAR} Joined: {created_str}\n"
-            f"{em.GIFT} Referrals: **{ref_count}** | Earned: **{ref_earned}**{ref_line}",
+            f"{em.GIFT} Referrals: **{ref_count}** | Earned: **{ref_earned}**{ref_line}"
+            f"</blockquote>",
         )
 
     # ── Broadcast ──
@@ -1849,6 +1951,7 @@ def _register_handlers(app: Client):
 
         await safe_edit(cq.message,
             f"{em.STATS} **Statistics**\n\n"
+            f"<blockquote expandable>"
             f"{em.USERS} Users: {s['users']}\n"
             f"{em.PHONE} Numbers (active): {s['sessions']}\n"
             f"{em.ONLINE} Connected: {active}\n"
@@ -1861,7 +1964,8 @@ def _register_handlers(app: Client):
             f"{funnel}"
             f"{revenue}\n\n"
             f"{em.CREDIT} **Payments by method:** {ps['total_payments']}{pay_lines}"
-            f"{top_lines}",
+            f"{top_lines}"
+            f"</blockquote>",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -1872,14 +1976,21 @@ def _register_handlers(app: Client):
     async def cb_get_number(_, cq: CallbackQuery):
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_gn:") else 0
 
+        offer = await db.get_active_offer(cq.from_user.id)
+        credits = await db.get_credits(cq.from_user.id)
+
         sessions = await db.get_active_sessions()
         by_country = {}
         for s in sessions:
             p = await db.get_session_price(s)
             if p is None:
                 continue
+            eff = apply_discount(p, offer)
+            # A zero-balance user can never get a number free — floor to 1.
+            if eff == 0 and credits <= 0:
+                eff = 1
             cc = s.get("country_code", "XX")
-            by_country.setdefault(cc, []).append((s, p))
+            by_country.setdefault(cc, []).append((s, eff))
 
         if not by_country:
             support = " | ".join(SUPPORT_HANDLES)
@@ -1905,7 +2016,7 @@ def _register_handlers(app: Client):
             min_p = min(session_prices) if session_prices else 1
             max_p = max(session_prices) if session_prices else 1
             range_str = f"({min_p}-{max_p})" if min_p != max_p else f"{min_p}"
-            
+
             available = sum(1 for s, _ in items if not clients.get_request_user(s["phone_number"]))
             all_lines.append(f"{flag} {name} — **{range_str}** cr — {available} available")
             all_buttons.append([InlineKeyboardButton(
@@ -1916,8 +2027,12 @@ def _register_handlers(app: Client):
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_gn", "main_menu")
         start = page * PAGE_SIZE
         page_lines = all_lines[start:start + PAGE_SIZE]
+        banner = offer_banner(offer)
+        header = f"{em.GLOBE} **Select a Country**\n"
+        if banner:
+            header += f"{banner} — prices shown already discounted\n"
         await safe_edit(cq.message,
-            f"{em.GLOBE} **Select a Country**\n\n" + "\n".join(page_lines) + page_label,
+            header + "\n" + "\n".join(page_lines) + page_label,
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
@@ -1931,14 +2046,21 @@ def _register_handlers(app: Client):
             cc = cq.data.split(":", 1)[1]
             page = 0
 
+        offer = await db.get_active_offer(cq.from_user.id)
+        credits = await db.get_credits(cq.from_user.id)
+
         sessions = await db.get_active_sessions_by_country(cc)
         valid_sessions = []
-        session_prices = []
+        session_prices = []   # effective (discounted) prices
         for s in sessions:
             p = await db.get_session_price(s)
             if p is not None:
+                eff = apply_discount(p, offer)
+                # A zero-balance user can never get a number free — floor to 1.
+                if eff == 0 and credits <= 0:
+                    eff = 1
                 valid_sessions.append(s)
-                session_prices.append(p)
+                session_prices.append(eff)
 
         if not valid_sessions:
             await cq.answer("No numbers available for this country.", show_alert=True)
@@ -1959,25 +2081,29 @@ def _register_handlers(app: Client):
             year_str = f" ({year})" if year else ""
             email_icon = f" {em.MAIL}" if s.get("email_added") else ""
             p = session_prices[i]
+            price_tag = "FREE" if p == 0 else f"{p} cr"
             assigned = clients.get_request_user(phone)
             if assigned:
                 all_buttons.append([
-                    InlineKeyboardButton(f"{em.OFFLINE} {masked}{year_str}{email_icon} — {p} cr (in use)", callback_data="noop", style=S.DEFAULT)
+                    InlineKeyboardButton(f"{em.OFFLINE} {masked}{year_str}{email_icon} — {price_tag} (in use)", callback_data="noop", style=S.DEFAULT)
                 ])
             else:
                 all_buttons.append([
                     InlineKeyboardButton(
-                        f"{em.ONLINE} {masked}{year_str}{email_icon} — {p} cr", callback_data=f"sel:{phone}", style=S.SUCCESS
+                        f"{em.ONLINE} {masked}{year_str}{email_icon} — {price_tag}", callback_data=f"sel:{phone}", style=S.SUCCESS
                     )
                 ])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, f"pg_cn:{cc}", "get_number")
+        banner = offer_banner(offer)
+        offer_note = f"{banner} — prices below already discounted\n\n" if banner else ""
         await safe_edit(cq.message,
-            f"{flag} **{name}** — **{range_str}** credits per OTP\n\n"
-            f"Select a number:\n"
-            f"{em.TIMER} Timeout: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
-            f"{em.INFO} **Note:** Your credit will be deducted on choosing the number\n"
-            f"and will be refunded after 2 hours when manual release.",
+            f"{flag} **{name}** — **{range_str}** credits per account\n\n"
+            f"{offer_note}"
+            f"Select an account to buy:\n"
+            f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
+            f"{em.INFO} **Note:** Your credits are deducted when you pick an account\n"
+            f"and refunded after 2 hours if you release it manually.",
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
@@ -2007,12 +2133,22 @@ def _register_handlers(app: Client):
             return
 
         cc = session.get("country_code", "XX")
-        price = await db.get_session_price(session)
-        if price is None:
+        base_price = await db.get_session_price(session)
+        if base_price is None:
             await cq.answer(f"{em.ERROR} This number is not configured for sale.", show_alert=True)
             return
 
+        # Apply any active discount offer server-side (never trust the client).
+        offer = await db.get_active_offer(cq.from_user.id)
+        price = apply_discount(base_price, offer)
+
         credits = await db.get_credits(cq.from_user.id)
+        # A fully-covered number is free only for users who hold real credits;
+        # a user with a zero balance pays a minimum of 1 credit.
+        if price == 0 and credits <= 0:
+            price = 1
+        saved = base_price - price
+
         if credits < price:
             await cq.answer(
                 f"{em.ERROR} You need {price} credits but have {credits}. Buy more credits!",
@@ -2064,7 +2200,9 @@ def _register_handlers(app: Client):
                 )
                 return
 
-        if not await db.deduct_credits(cq.from_user.id, price):
+        # price may be 0 when a discount fully covers it — that's a free number,
+        # so skip deduction (a $inc of -0 would report no change and misfire).
+        if price > 0 and not await db.deduct_credits(cq.from_user.id, price):
             await clients.stop_session(phone)
             await safe_edit(cq.message,
                 f"{em.ERROR} Could not deduct credits. Please try again or contact support.",
@@ -2079,33 +2217,52 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         credits = await db.get_credits(cq.from_user.id)
-        await alert(app,
+        admin_price_line = f"{em.MONEY} Price: **{price}** credits (paid)\n"
+        if saved > 0:
+            paid_display = "**FREE** (0 paid)" if price == 0 else f"**{price}** credits paid"
+            admin_price_line = (
+                f"{em.MONEY} Original price: **{base_price}** credits\n"
+                f"{em.GIFT} Offer discount: **{saved}** credits\n"
+                f"{em.CREDIT} Actual credits used: {paid_display}\n"
+            )
+        # Defer this admin alert until an OTP is actually forwarded — stash the
+        # text on the active request so clients.py can send it at that point.
+        purchase_alert = (
             f"{em.PHONE} **Number Purchased**\n\n"
             f"{em.USER} User: `{cq.from_user.id}` (@{uname})\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"{em.MONEY} Price: **{price}** credits\n"
+            f"{admin_price_line}"
             f"{em.MONEY} Remaining balance: **{credits}**"
         )
+        req_info = clients.active_requests.get(phone)
+        if req_info is not None:
+            req_info["purchase_alert"] = purchase_alert
         credit_line = f"\n{em.MONEY} Credits: {credits}"
-        pwd = session.get("password", "")
-        pwd_line = f"\n{em.PASSWORD} 2FA Password: `{pwd}`" if pwd else ""
         acc_year = session.get("account_year")
         age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
         email_added = session.get("email_added", False)
         email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
         support = " | ".join(SUPPORT_HANDLES)
+        if saved > 0:
+            price_display = "**FREE** 🎉" if price == 0 else f"**{price}** credits (deducted)"
+            price_line = (
+                f"{em.MONEY} Price: {price_display}\n"
+                f"{em.GIFT} Offer applied: **{saved} credits off** (was {base_price}) — you saved **{saved}** credits\n"
+            )
+        else:
+            price_line = f"{em.MONEY} Price: **{price}** credits (deducted)\n"
         await safe_edit(cq.message,
-            f"{em.SUCCESS} **Number assigned!**\n\n"
+            f"{em.SUCCESS} **Account purchased!**\n\n"
             f"{flag} {name}\n"
             f"{em.PHONE} `{phone}`\n"
-            f"{em.MONEY} Price: **{price}** credits (deducted)\n"
-            f"{em.TIMER} Timeout: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}{pwd_line}\n\n"
-            "Any OTP received on this number will be forwarded to you.\n\n"
+            f"{price_line}"
+            f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
+            "The login OTP for this account will be forwarded to you here.\n\n"
             f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
             f"{em.WARNING} Issues logging in? Contact support:\n{support}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.UNLOCK} Release Number", callback_data=f"release:{phone}", style=S.DANGER)],
+                [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
             ]),
         )
 
@@ -2163,7 +2320,7 @@ def _register_handlers(app: Client):
         if not otps:
             await safe_edit(cq.message,
                 f"{em.LOGS} **No OTP history yet.**\n\n"
-                f"Your received OTPs will appear here after you rent a number.",
+                f"Your login OTPs will appear here after you buy an account.",
                 reply_markup=back_kb("main_menu"),
             )
             return
@@ -2193,7 +2350,9 @@ def _register_handlers(app: Client):
         page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
 
         await safe_edit(cq.message,
-            f"{em.LOGS} **Recent OTPs:**\n\n" + "\n".join(page_lines) + page_label,
+            f"{em.LOGS} **Recent OTPs:**\n\n<blockquote expandable>"
+            + "\n".join(page_lines)
+            + "</blockquote>" + page_label,
             reply_markup=InlineKeyboardMarkup(footer),
         )
 
@@ -2416,29 +2575,37 @@ def _register_handlers(app: Client):
     def _build_help_text(is_admin: bool) -> str:
         admin_section = (
             f"\n\n{em.GEAR} **Admin Commands:**\n"
-            "  /addcred `<userid>` `<credits>` — Add credits to a user\n"
-            "  /removecred `<userid>` `<credits>` — Remove credits from a user\n"
-            "  /info `<userid or @username>` — Look up user details\n"
-            "  /broadcast `<message>` — Broadcast to all users\n"
-            "  /broadcast `-name` `<message>` — Broadcast with your name"
+            "<blockquote expandable>"
+            "/addcred `<userid>` `<credits>` — Add credits to a user\n"
+            "/removecred `<userid>` `<credits>` — Remove credits from a user\n"
+            "/info `<userid or @username>` — Look up user details\n"
+            "/broadcast `<message>` — Broadcast to all users\n"
+            "/broadcast `-name` `<message>` — Broadcast with your name"
+            "</blockquote>"
         ) if is_admin else ""
         return (
             f"{em.HELP} **Help — OTP Bot**\n\n"
             f"{em.PIN} **How it works:**\n"
-            "  1. Buy credits via UPI or Crypto\n"
-            "  2. Tap **Get Number** and select a country\n"
-            "  3. Pick an available number — credits are deducted\n"
-            "  4. OTP messages arriving on that number are forwarded to you\n"
-            "  5. The number auto-releases after the timeout\n\n"
+            "<blockquote>"
+            "1. Buy credits via UPI or Crypto\n"
+            "2. Tap **Buy Account** and select a country\n"
+            "3. Pick an available account — credits are deducted\n"
+            "4. The login OTP for that account is forwarded to you\n"
+            "5. The account auto-releases if unused before the timeout"
+            "</blockquote>\n\n"
             f"{em.FAQ} **Features:**\n"
-            f"  • {em.PHONE} **Get Number** — Rent a number to receive OTPs\n"
-            f"  • {em.LOGS} **My History** — View your past sessions\n"
-            f"  • {em.CREDIT} **Buy Credits** — Top up via UPI or USDT\n"
-            f"  • {em.PHONE} **Support** — Contact our support agents\n\n"
+            "<blockquote>"
+            f"• {em.PHONE} **Buy Account** — Purchase a Telegram account and get its login OTP\n"
+            f"• {em.LOGS} **My History** — View your past purchases\n"
+            f"• {em.CREDIT} **Buy Credits** — Top up via UPI or USDT\n"
+            f"• {em.PHONE} **Support** — Contact our support agents"
+            "</blockquote>\n\n"
             f"{em.SETTINGS} **Commands:**\n"
-            "  /start — Main menu\n"
-            "  /help — This help page\n"
-            "  /cancel — Cancel current operation"
+            "<blockquote>"
+            "/start — Main menu\n"
+            "/help — This help page\n"
+            "/cancel — Cancel current operation"
+            "</blockquote>"
             f"{admin_section}"
         )
 
@@ -2472,9 +2639,11 @@ def _register_handlers(app: Client):
         caption = (
             f"🎬 **How to Use OTP Bot — Tutorial Video**\n\n"
             f"Here is a quick guide on how to use the bot:\n"
+            f"<blockquote>"
             f"1️⃣ **Top Up**: Buy credits via UPI or Crypto.\n"
-            f"2️⃣ **Rent a Number**: Go to **Get Number**, select country, and rent.\n"
-            f"3️⃣ **Receive OTP**: The bot will display incoming OTP messages instantly."
+            f"2️⃣ **Buy an Account**: Go to **Buy Account**, select a country, and purchase.\n"
+            f"3️⃣ **Get Login OTP**: The bot will display the account's login OTP instantly."
+            f"</blockquote>"
         )
 
         video_sent = False

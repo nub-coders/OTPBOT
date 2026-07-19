@@ -37,6 +37,17 @@ VERIFY_PORT = int(os.getenv("VERIFY_PORT", "8888"))
 REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "5"))
 REFERRAL_VERIFY_BONUS = int(os.getenv("REFERRAL_VERIFY_BONUS", "1"))
 
+# ── Random time-limited discount offers ──
+# A random flat credit discount (biased toward the minimum) is granted to a
+# user when they /start, valid for a random window, then locked out for a
+# cooldown period before another can be granted. The effective price is always
+# clamped to a minimum of 1 credit so cheap numbers never become free.
+OFFER_MIN_CREDITS = int(os.getenv("OFFER_MIN_CREDITS", "2"))
+OFFER_MAX_CREDITS = int(os.getenv("OFFER_MAX_CREDITS", "25"))
+OFFER_MIN_HOURS = float(os.getenv("OFFER_MIN_HOURS", "4"))
+OFFER_MAX_HOURS = float(os.getenv("OFFER_MAX_HOURS", "6"))
+OFFER_COOLDOWN_HOURS = float(os.getenv("OFFER_COOLDOWN_HOURS", "24"))
+
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},
     "25": {"credits": 25, "amount_inr": 2500, "label": "25 Credits — ₹25"},
