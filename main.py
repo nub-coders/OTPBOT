@@ -49,7 +49,7 @@ async def recover_pending_payments(bot):
     """On startup, resume checking any pending Razorpay payments."""
     import database as db
     import payments
-    from bot import get_credit_plan, back_kb, _check_referral_reward
+    from bot import get_credit_plan, award_razorpay_payment
 
     pending = await db.get_pending_payments()
     if not pending:
@@ -59,8 +59,8 @@ async def recover_pending_payments(bot):
     for p in pending:
         qr_id = p["qr_id"]
         plan_key = p["plan_key"]
-        user_id = p["user_id"]
         amount_inr = p["amount_inr"]
+        assign_phone = p.get("assign_phone")
 
         plan = get_credit_plan(plan_key)
         if not plan:
@@ -72,22 +72,10 @@ async def recover_pending_payments(bot):
         )
 
         if status == "paid":
-            await db.mark_pending_payment_done(qr_id)
-            await db.add_credits(user_id, plan["credits"])
-            await db.save_payment(user_id, "razorpay", plan_key, amount_inr / 100, "INR", qr_id)
-            await _check_referral_reward(user_id)
-            new_balance = await db.get_credits(user_id)
-            log.info("Recovered payment %s: +%d credits to user %d", qr_id, plan["credits"], user_id)
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"✅ **Payment received!** (recovered after restart)\n\n"
-                    f"🎁 +{plan['credits']} credits added\n"
-                    f"💰 New balance: **{new_balance}**",
-                    reply_markup=back_kb("main_menu"),
-                )
-            except Exception:
-                pass
+            await award_razorpay_payment(
+                p["user_id"], qr_id, plan_key, assign_phone=assign_phone,
+            )
+            log.info("Recovered payment %s for user %d", qr_id, p["user_id"])
         elif status == "expired":
             await db.mark_pending_payment_expired(qr_id)
             log.info("Payment %s expired", qr_id)
@@ -138,7 +126,7 @@ async def payment_recovery_processor(bot):
     """Background task that checks still-pending payments every 30 seconds."""
     import database as db
     import payments
-    from bot import get_credit_plan, back_kb, _check_referral_reward
+    from bot import get_credit_plan, award_razorpay_payment
 
     while True:
         try:
@@ -146,8 +134,8 @@ async def payment_recovery_processor(bot):
             for p in pending:
                 qr_id = p["qr_id"]
                 plan_key = p["plan_key"]
-                user_id = p["user_id"]
                 amount_inr = p["amount_inr"]
+                assign_phone = p.get("assign_phone")
 
                 plan = get_credit_plan(plan_key)
                 if not plan:
@@ -159,23 +147,10 @@ async def payment_recovery_processor(bot):
                 )
 
                 if status == "paid":
-                    if not await db.mark_pending_payment_done(qr_id):
-                        continue
-                    await db.add_credits(user_id, plan["credits"])
-                    await db.save_payment(user_id, "razorpay", plan_key, amount_inr / 100, "INR", qr_id)
-                    await _check_referral_reward(user_id)
-                    new_balance = await db.get_credits(user_id)
-                    log.info("Payment %s confirmed: +%d credits to user %d", qr_id, plan["credits"], user_id)
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"✅ **Payment received!**\n\n"
-                            f"🎁 +{plan['credits']} credits added\n"
-                            f"💰 New balance: **{new_balance}**",
-                            reply_markup=back_kb("main_menu"),
-                        )
-                    except Exception:
-                        pass
+                    if await award_razorpay_payment(
+                        p["user_id"], qr_id, plan_key, assign_phone=assign_phone,
+                    ):
+                        log.info("Payment %s confirmed for user %d", qr_id, p["user_id"])
                 elif status == "expired":
                     await db.mark_pending_payment_expired(qr_id)
         except Exception as e:
