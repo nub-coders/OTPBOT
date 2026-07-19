@@ -2150,121 +2150,90 @@ def _register_handlers(app: Client):
         saved = base_price - price
 
         if credits < price:
+            # Not enough credits — auto-generate a top-up QR for exactly the
+            # shortfall so the user can pay and have the number assigned
+            # automatically once the payment lands.
+            await _start_shortfall_topup(cq, phone, cc, base_price, price, credits, saved)
+            return
+
+        await _finalize_purchase(cq.from_user.id, phone, edit_msg=cq.message)
+
+    async def _start_shortfall_topup(cq, phone, cc, base_price, price, credits, saved):
+        """Generate a Razorpay QR for (effective price − credits) and, once paid,
+        assign the selected number automatically."""
+        shortfall = price - credits
+
+        # Razorpay UPI QR codes have a ₹1 minimum, but we only auto-generate a QR
+        # when the top-up is at least 10 credits (₹10); smaller shortfalls are
+        # nudged to the Buy Credits menu instead.
+        if shortfall < 10:
             await cq.answer(
-                f"{em.ERROR} You need {price} credits but have {credits}. Buy more credits!",
+                f"{em.ERROR} You need {shortfall} more credit(s) for this account "
+                f"({price} needed, you have {credits}).\n\n"
+                f"Top-ups start at 10 credits — tap Buy Credits.",
                 show_alert=True,
             )
+            offer_line = f"\n{em.GIFT} Offer applied: **{saved} credits off** (was {base_price})" if saved > 0 else ""
+            await safe_edit(cq.message,
+                f"{em.MONEY} **Not enough credits**\n\n"
+                f"{em.PHONE} `{mask_phone(phone)}`\n"
+                f"{em.CREDIT} Price: **{price}** credits{offer_line}\n"
+                f"{em.MONEY} Your balance: **{credits}** credits\n"
+                f"{em.WARNING} Shortfall: **{shortfall}** credit(s)\n\n"
+                "Auto top-up needs at least 10 credits. Tap below to buy credits.",
+                reply_markup=back_kb("buy_credits"),
+            )
             return
 
-        await safe_edit(cq.message, f"{em.LOADING} Connecting session...")
+        plan_key = f"custom_{shortfall}"
+        plan = get_credit_plan(plan_key)
+
+        await safe_edit(cq.message, f"{em.LOADING} Generating payment QR...")
+        qr = await asyncio.to_thread(
+            payments.create_razorpay_qr, plan["label"], plan["amount_inr"], cq.from_user.id,
+        )
+        if not qr:
+            await safe_edit(cq.message,
+                f"{em.ERROR} Payment gateway error. Try later.",
+                reply_markup=back_kb("buy_credits"),
+            )
+            return
+
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.SUCCESS} I've Paid", callback_data=f"rz_check:{qr['id']}:{plan_key}", style=S.SUCCESS)],
+            [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="get_number", style=S.DANGER)],
+        ])
 
         try:
-            await clients.start_session(phone, session["session_string"])
-        except Exception as e:
-            log.error("Failed to start session %s: %s", phone, e)
-            await db.set_session_status(phone, "unlisted", str(e))
-            await db.log_auth_failure(phone, str(e), kind="connect", requested_by=cq.from_user.id)
-            await alert(app,
-                f"{em.ALERT} **Session Connection Failed — Unlisted**\n\n"
-                f"{em.USER} Requested by: `{cq.from_user.id}`\n"
-                f"{em.PHONE} Number: `{phone}`\n"
-                f"{em.ERROR} Error: `{str(e)[:200]}`"
-            )
-            await safe_edit(cq.message,
-                f"{em.ERROR} Failed to connect `{mask_phone(phone)}`.\n\n"
-                "This has been reported to the admins.",
-                reply_markup=back_kb("main_menu"),
-            )
-            return
+            await cq.message.delete()
+        except Exception:
+            pass
 
-        pwd = session.get("password", "")
-        if pwd:
-            await safe_edit(cq.message, f"{em.LOADING} Verifying password...")
-            ok, err = await clients.check_password(phone, pwd)
-            if not ok:
-                await clients.stop_session(phone)
-                await db.set_session_status(phone, "unlisted", err)
-                await db.log_auth_failure(phone, err, kind="password", requested_by=cq.from_user.id)
-                masked = mask_phone(phone)
-                await alert(app,
-                    f"{em.ALERT} **Password Check Failed — Unlisted**\n\n"
-                    f"{em.USER} Requested by: `{cq.from_user.id}`\n"
-                    f"{em.PHONE} Number: `{phone}`\n"
-                    f"{em.ERROR} Error: `{err[:200]}`\n"
-                    f"{em.PASSWORD} Stored password may be wrong or changed."
-                )
-                await safe_edit(cq.message,
-                    f"{em.ERROR} Password verification failed for `{masked}`.\n\n"
-                    "This has been reported to the admins.",
-                    reply_markup=back_kb("main_menu"),
-                )
-                return
-
-        # price may be 0 when a discount fully covers it — that's a free number,
-        # so skip deduction (a $inc of -0 would report no change and misfire).
-        if price > 0 and not await db.deduct_credits(cq.from_user.id, price):
-            await clients.stop_session(phone)
-            await safe_edit(cq.message,
-                f"{em.ERROR} Could not deduct credits. Please try again or contact support.",
-                reply_markup=back_kb("main_menu"),
-            )
-            return
-        log.info("Deducted %d credits from user %d on selection", price, cq.from_user.id)
-
-        clients.assign_number(phone, cq.from_user.id, OTP_TIMEOUT, price)
-
-        uname = cq.from_user.username or cq.from_user.first_name or str(cq.from_user.id)
         flag = get_country_flag(cc)
-        name = get_country_name(cc)
-        credits = await db.get_credits(cq.from_user.id)
-        admin_price_line = f"{em.MONEY} Price: **{price}** credits (paid)\n"
-        if saved > 0:
-            paid_display = "**FREE** (0 paid)" if price == 0 else f"**{price}** credits paid"
-            admin_price_line = (
-                f"{em.MONEY} Original price: **{base_price}** credits\n"
-                f"{em.GIFT} Offer discount: **{saved}** credits\n"
-                f"{em.CREDIT} Actual credits used: {paid_display}\n"
-            )
-        # Defer this admin alert until an OTP is actually forwarded — stash the
-        # text on the active request so clients.py can send it at that point.
-        purchase_alert = (
-            f"{em.PHONE} **Number Purchased**\n\n"
-            f"{em.USER} User: `{cq.from_user.id}` (@{uname})\n"
-            f"{em.PHONE} Number: `{phone}`\n"
-            f"{flag} Country: {name}\n"
-            f"{admin_price_line}"
-            f"{em.MONEY} Remaining balance: **{credits}**"
+        offer_line = f"{em.GIFT} Offer: **{saved} credits off** (was {base_price})\n" if saved > 0 else ""
+        qr_msg = await bot.send_photo(
+            cq.from_user.id,
+            photo=qr["image_url"],
+            caption=(
+                f"{em.MONEY} **Top up to grab this account**\n\n"
+                f"{flag} `{mask_phone(phone)}` — **{price}** credits\n"
+                f"{offer_line}"
+                f"{em.CREDIT} Your balance: **{credits}** — short by **{shortfall}**\n\n"
+                f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}** ({shortfall} credits)\n"
+                f"{em.SUCCESS} Once paid, `{mask_phone(phone)}` is assigned to you automatically.\n\n"
+                f"{em.TIMER} Valid for 15 minutes."
+            ),
+            reply_markup=buttons,
         )
-        req_info = clients.active_requests.get(phone)
-        if req_info is not None:
-            req_info["purchase_alert"] = purchase_alert
-        credit_line = f"\n{em.MONEY} Credits: {credits}"
-        acc_year = session.get("account_year")
-        age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
-        email_added = session.get("email_added", False)
-        email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
-        support = " | ".join(SUPPORT_HANDLES)
-        if saved > 0:
-            price_display = "**FREE** 🎉" if price == 0 else f"**{price}** credits (deducted)"
-            price_line = (
-                f"{em.MONEY} Price: {price_display}\n"
-                f"{em.GIFT} Offer applied: **{saved} credits off** (was {base_price}) — you saved **{saved}** credits\n"
-            )
-        else:
-            price_line = f"{em.MONEY} Price: **{price}** credits (deducted)\n"
-        await safe_edit(cq.message,
-            f"{em.SUCCESS} **Account purchased!**\n\n"
-            f"{flag} {name}\n"
-            f"{em.PHONE} `{phone}`\n"
-            f"{price_line}"
-            f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
-            "The login OTP for this account will be forwarded to you here.\n\n"
-            f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
-            f"{em.WARNING} Issues logging in? Contact support:\n{support}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
-            ]),
+
+        await db.save_pending_payment(
+            cq.from_user.id, qr["id"], plan_key, plan["amount_inr"],
+            qr_msg.chat.id, qr_msg.id, assign_phone=phone,
         )
+
+        asyncio.create_task(_razorpay_poller(
+            cq.from_user.id, qr["id"], plan_key, qr_msg, assign_phone=phone,
+        ))
 
     @app.on_callback_query(filters.regex(r"^release:"))
     @verified
@@ -2456,6 +2425,14 @@ def _register_handlers(app: Client):
         )
         if status == "paid":
             await cq.answer(f"{em.SUCCESS} Payment received!", show_alert=True)
+            # Award immediately (idempotent) so credits/assignment don't wait for
+            # the next poll tick. The QR message is this callback's own message.
+            pending = await db.get_pending_payment(qr_id)
+            assign_phone = pending.get("assign_phone") if pending else None
+            await award_razorpay_payment(
+                cq.from_user.id, qr_id, plan_key,
+                assign_phone=assign_phone, qr_msg=cq.message,
+            )
         elif status == "expired":
             await cq.answer(f"{em.ERROR} QR expired. Generate a new one.", show_alert=True)
         else:
@@ -3157,9 +3134,234 @@ async def _handle_edit_num_set_price(message: Message, text: str):
     )
 
 
+# ── Purchase finalization ──
+
+async def _send_or_edit(user_id: int, edit_msg, text, reply_markup=None):
+    """Edit an existing message when given one, otherwise send a fresh message."""
+    if edit_msg is not None:
+        return await safe_edit(edit_msg, text, reply_markup=reply_markup)
+    return await bot.send_message(user_id, text, reply_markup=reply_markup)
+
+
+async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
+    """Connect the session, deduct the effective price and assign the number.
+
+    Price and offer are recomputed at call time so this is safe to invoke after a
+    deferred top-up payment (the balance/offer may have changed since selection).
+    Returns True only when the number was successfully assigned.
+    """
+    user = await db.get_user(user_id)
+    if not user:
+        return False
+
+    session = await db.get_session(phone)
+    if not session or session.get("status") != "active":
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.ERROR} Number `{mask_phone(phone)}` is no longer available.",
+            reply_markup=back_kb("get_number"))
+        return False
+
+    existing = clients.get_request_user(phone)
+    if existing and existing != user_id:
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.OFFLINE} `{mask_phone(phone)}` was just taken by someone else.",
+            reply_markup=back_kb("get_number"))
+        return False
+
+    cc = session.get("country_code", "XX")
+    base_price = await db.get_session_price(session)
+    if base_price is None:
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.ERROR} This number is not configured for sale.",
+            reply_markup=back_kb("get_number"))
+        return False
+
+    # Apply any active discount offer server-side (never trust the client).
+    offer = await db.get_active_offer(user_id)
+    price = apply_discount(base_price, offer)
+    credits = await db.get_credits(user_id)
+    # A fully-covered number is free only for users who hold real credits.
+    if price == 0 and credits <= 0:
+        price = 1
+    saved = base_price - price
+
+    if credits < price:
+        # An offer may have expired between top-up and payment, raising the price.
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.ERROR} You need {price} credits but have {credits}. "
+            f"Your top-up was added to your balance — buy more credits or pick another number.",
+            reply_markup=back_kb("buy_credits"))
+        return False
+
+    await _send_or_edit(user_id, edit_msg, f"{em.LOADING} Connecting session...")
+
+    try:
+        await clients.start_session(phone, session["session_string"])
+    except Exception as e:
+        log.error("Failed to start session %s: %s", phone, e)
+        await db.set_session_status(phone, "unlisted", str(e))
+        await db.log_auth_failure(phone, str(e), kind="connect", requested_by=user_id)
+        await alert(bot,
+            f"{em.ALERT} **Session Connection Failed — Unlisted**\n\n"
+            f"{em.USER} Requested by: `{user_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{em.ERROR} Error: `{str(e)[:200]}`"
+        )
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.ERROR} Failed to connect `{mask_phone(phone)}`.\n\n"
+            "This has been reported to the admins.",
+            reply_markup=back_kb("main_menu"))
+        return False
+
+    pwd = session.get("password", "")
+    if pwd:
+        await _send_or_edit(user_id, edit_msg, f"{em.LOADING} Verifying password...")
+        ok, err = await clients.check_password(phone, pwd)
+        if not ok:
+            await clients.stop_session(phone)
+            await db.set_session_status(phone, "unlisted", err)
+            await db.log_auth_failure(phone, err, kind="password", requested_by=user_id)
+            await alert(bot,
+                f"{em.ALERT} **Password Check Failed — Unlisted**\n\n"
+                f"{em.USER} Requested by: `{user_id}`\n"
+                f"{em.PHONE} Number: `{phone}`\n"
+                f"{em.ERROR} Error: `{err[:200]}`\n"
+                f"{em.PASSWORD} Stored password may be wrong or changed."
+            )
+            await _send_or_edit(user_id, edit_msg,
+                f"{em.ERROR} Password verification failed for `{mask_phone(phone)}`.\n\n"
+                "This has been reported to the admins.",
+                reply_markup=back_kb("main_menu"))
+            return False
+
+    # price may be 0 when a discount fully covers it — that's a free number,
+    # so skip deduction (a $inc of -0 would report no change and misfire).
+    if price > 0 and not await db.deduct_credits(user_id, price):
+        await clients.stop_session(phone)
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.ERROR} Could not deduct credits. Please try again or contact support.",
+            reply_markup=back_kb("main_menu"))
+        return False
+    log.info("Deducted %d credits from user %d on selection", price, user_id)
+
+    clients.assign_number(phone, user_id, OTP_TIMEOUT, price)
+
+    uname = user.get("username") or user.get("first_name") or str(user_id)
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
+    credits = await db.get_credits(user_id)
+    admin_price_line = f"{em.MONEY} Price: **{price}** credits (paid)\n"
+    if saved > 0:
+        paid_display = "**FREE** (0 paid)" if price == 0 else f"**{price}** credits paid"
+        admin_price_line = (
+            f"{em.MONEY} Original price: **{base_price}** credits\n"
+            f"{em.GIFT} Offer discount: **{saved}** credits\n"
+            f"{em.CREDIT} Actual credits used: {paid_display}\n"
+        )
+    # Defer this admin alert until an OTP is actually forwarded — stash the
+    # text on the active request so clients.py can send it at that point.
+    purchase_alert = (
+        f"{em.PHONE} **Number Purchased**\n\n"
+        f"{em.USER} User: `{user_id}` (@{uname})\n"
+        f"{em.PHONE} Number: `{phone}`\n"
+        f"{flag} Country: {name}\n"
+        f"{admin_price_line}"
+        f"{em.MONEY} Remaining balance: **{credits}**"
+    )
+    req_info = clients.active_requests.get(phone)
+    if req_info is not None:
+        req_info["purchase_alert"] = purchase_alert
+    credit_line = f"\n{em.MONEY} Credits: {credits}"
+    acc_year = session.get("account_year")
+    age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
+    email_added = session.get("email_added", False)
+    email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
+    support = " | ".join(SUPPORT_HANDLES)
+    if saved > 0:
+        price_display = "**FREE** 🎉" if price == 0 else f"**{price}** credits (deducted)"
+        price_line = (
+            f"{em.MONEY} Price: {price_display}\n"
+            f"{em.GIFT} Offer applied: **{saved} credits off** (was {base_price}) — you saved **{saved}** credits\n"
+        )
+    else:
+        price_line = f"{em.MONEY} Price: **{price}** credits (deducted)\n"
+    await _send_or_edit(user_id, edit_msg,
+        f"{em.SUCCESS} **Account purchased!**\n\n"
+        f"{flag} {name}\n"
+        f"{em.PHONE} `{phone}`\n"
+        f"{price_line}"
+        f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
+        "The login OTP for this account will be forwarded to you here.\n\n"
+        f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
+        f"{em.WARNING} Issues logging in? Contact support:\n{support}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
+        ]),
+    )
+    return True
+
+
 # ── Payment helpers ──
 
-async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
+async def award_razorpay_payment(user_id: int, qr_id: str, plan_key: str,
+                                 assign_phone: str = None, qr_msg=None) -> bool:
+    """Credit a confirmed Razorpay payment exactly once and notify the user.
+
+    When ``assign_phone`` is set (a deferred top-up for a specific number), the
+    number is assigned automatically after crediting. Returns True if this call
+    was the one that flipped the pending payment to done.
+    """
+    plan = get_credit_plan(plan_key)
+    if not plan:
+        return False
+    # Atomic flip guarantees credits are granted once even if the live poller and
+    # the restart-recovery processor both observe the payment.
+    if not await db.mark_pending_payment_done(qr_id):
+        return False
+
+    await db.add_credits(user_id, plan["credits"])
+    await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
+    await _check_referral_reward(user_id)
+    new_balance = await db.get_credits(user_id)
+    buyer = await db.get_user(user_id)
+    buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
+    await alert(bot,
+        f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
+        f"{em.USER} User: `{user_id}` ({buyer_name})\n"
+        f"{em.GIFT} Credits: +{plan['credits']}\n"
+        f"{em.DOLLAR} Amount: ₹{plan['amount_inr'] // 100}\n"
+        f"{em.MONEY} New balance: {new_balance}"
+        + (f"\n{em.PHONE} Auto-assigning: `{assign_phone}`" if assign_phone else "")
+    )
+
+    if qr_msg is not None:
+        try:
+            await qr_msg.delete()
+        except Exception:
+            pass
+
+    if assign_phone:
+        # Confirm the top-up, then run the full purchase/assignment flow.
+        await bot.send_message(
+            user_id,
+            f"{em.SUCCESS} **Payment received!**\n\n"
+            f"{em.GIFT} +{plan['credits']} credits added\n"
+            f"{em.MONEY} New balance: **{new_balance}**\n\n"
+            f"{em.LOADING} Assigning `{mask_phone(assign_phone)}`...",
+        )
+        await _finalize_purchase(user_id, assign_phone, edit_msg=None)
+    else:
+        await bot.send_message(
+            user_id,
+            f"{em.SUCCESS} **Payment received!**\n\n"
+            f"{em.GIFT} +{plan['credits']} credits added\n"
+            f"{em.MONEY} New balance: **{new_balance}**",
+            reply_markup=back_kb("main_menu"),
+        )
+    return True
+
+
+async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg, assign_phone: str = None):
     import time as _time
     plan = get_credit_plan(plan_key)
     if not plan:
@@ -3171,31 +3373,8 @@ async def _razorpay_poller(user_id: int, qr_id: str, plan_key: str, qr_msg):
             payments.check_razorpay_payment, qr_id, plan["amount_inr"],
         )
         if status == "paid":
-            if not await db.mark_pending_payment_done(qr_id):
-                return
-            await db.add_credits(user_id, plan["credits"])
-            await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
-            await _check_referral_reward(user_id)
-            new_balance = await db.get_credits(user_id)
-            buyer = await db.get_user(user_id)
-            buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
-            await alert(bot,
-                f"{em.CREDIT} **Credits Purchased (Razorpay)**\n\n"
-                f"{em.USER} User: `{user_id}` ({buyer_name})\n"
-                f"{em.GIFT} Credits: +{plan['credits']}\n"
-                f"{em.DOLLAR} Amount: ₹{plan['amount_inr'] // 100}\n"
-                f"{em.MONEY} New balance: {new_balance}"
-            )
-            try:
-                await qr_msg.delete()
-            except Exception:
-                pass
-            await bot.send_message(
-                user_id,
-                f"{em.SUCCESS} **Payment received!**\n\n"
-                f"{em.GIFT} +{plan['credits']} credits added\n"
-                f"{em.MONEY} New balance: **{new_balance}**",
-                reply_markup=back_kb("main_menu"),
+            await award_razorpay_payment(
+                user_id, qr_id, plan_key, assign_phone=assign_phone, qr_msg=qr_msg,
             )
             return
         if status == "expired":

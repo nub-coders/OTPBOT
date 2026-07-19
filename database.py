@@ -367,7 +367,7 @@ async def get_all_active_assignments():
 
 # ── Pending Payments ──
 
-async def save_pending_payment(user_id: int, qr_id: str, plan_key: str, amount_inr: int, msg_chat_id: int, msg_id: int):
+async def save_pending_payment(user_id: int, qr_id: str, plan_key: str, amount_inr: int, msg_chat_id: int, msg_id: int, assign_phone: str = None):
     doc = {
         "user_id": user_id,
         "qr_id": qr_id,
@@ -375,6 +375,8 @@ async def save_pending_payment(user_id: int, qr_id: str, plan_key: str, amount_i
         "amount_inr": amount_inr,
         "msg_chat_id": msg_chat_id,
         "msg_id": msg_id,
+        # When set, the number to auto-assign once the top-up is paid.
+        "assign_phone": assign_phone,
         "status": "pending",
         "created_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
@@ -388,6 +390,10 @@ async def save_pending_payment(user_id: int, qr_id: str, plan_key: str, amount_i
 
 async def get_pending_payments():
     return await db.pending_payments.find({"status": "pending"}).to_list(None)
+
+
+async def get_pending_payment(qr_id: str):
+    return await db.pending_payments.find_one({"qr_id": qr_id})
 
 
 async def mark_pending_payment_done(qr_id: str) -> bool:
