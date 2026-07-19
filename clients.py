@@ -3,7 +3,7 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
 
-from config import API_ID, API_HASH, SUPPORT_HANDLES
+from config import API_ID, API_HASH, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS
 import database as db
 from utils import extract_otp, detect_country, estimate_account_year
 
@@ -20,6 +20,23 @@ def set_bot(bot: Client):
     global bot_app
     bot_app = bot
     log.info("Bot reference set")
+
+
+async def _send_admin_alert(text: str):
+    """Send an alert to CHAT_ID channel, or to all admins if not configured."""
+    if not bot_app:
+        return
+    if CHAT_ID:
+        try:
+            await bot_app.send_message(CHAT_ID, text)
+        except Exception as e:
+            log.error("Failed to send alert to CHAT_ID %s: %s", CHAT_ID, e)
+    else:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot_app.send_message(admin_id, text)
+            except Exception as e:
+                log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
 
 async def _on_new_message(client: Client, message):
@@ -76,6 +93,11 @@ async def _on_new_message(client: Client, message):
         req_info = active_requests.get(phone)
         if req_info:
             req_info["otp_received"] = True
+            # Fire the deferred "Number Purchased" admin alert now that an OTP
+            # was actually forwarded. Pop it so it's only sent once.
+            purchase_alert = req_info.pop("purchase_alert", None)
+            if purchase_alert:
+                await _send_admin_alert(purchase_alert)
         await db.mark_assignment_otp_received(phone)
         log.info("[%s] OTP delivered, session stays active until timeout/release", phone)
     else:
