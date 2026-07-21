@@ -18,14 +18,16 @@ from pyrogram.errors import (
     PhoneNumberInvalid,
     FloodWait,
     MessageNotModified,
+    PeerFlood,
 )
+from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, SELLER_PAYOUT_PERCENT
 import database as db
 import clients
 import payments
 import verification
-from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone
+from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone, mask_secret, extract_year_from_reg_month, get_active_sessions_info, format_timestamp
 import custom_emojis as em
 em.patch_pyrogram_for_custom_emojis()
 
@@ -34,6 +36,8 @@ log = logging.getLogger(__name__)
 bot: Client = None
 auth_states: dict[int, dict] = {}
 pay_states: dict[int, dict] = {}
+sell_states: dict[int, dict] = {}   # tracks user-side sell-account auth flow
+sell_recheck_states: dict[int, dict] = {}  # holds submission data for a pending session re-check
 
 
 def get_credit_plan(plan_key: str) -> dict | None:
@@ -260,23 +264,24 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(f"{em.PHONE} Buy Account", callback_data="get_number", style=S.PRIMARY),
-            InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.PRIMARY),
         ],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
         [
-            InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.DEFAULT),
-            InlineKeyboardButton(f"{em.TUTORIAL} How to Use", callback_data="how_to_use", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.DOLLAR} Sell Account", callback_data="sell_account", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.PRIMARY),
         ],
         [
-            InlineKeyboardButton(f"{em.PHONE} Support", callback_data="support", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.TUTORIAL} How to Use", callback_data="how_to_use", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.SUPPORT} Support", callback_data="support", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
         ],
     ]
     if UPDATES_CHANNEL:
-        buttons[-1].append(InlineKeyboardButton(f"{em.BROADCAST} Updates", url=UPDATES_CHANNEL, style=S.DEFAULT))
+        buttons[-1].append(InlineKeyboardButton(f"{em.BROADCAST} Updates", url=UPDATES_CHANNEL, style=S.SUCCESS))
     if is_admin:
         buttons.append(
-            [InlineKeyboardButton(f"{em.GEAR} Admin Panel", callback_data="admin_panel", style=S.PRIMARY)]
+            [InlineKeyboardButton(f"{em.GEAR} Admin Panel", callback_data="admin_panel", style=S.DANGER)]
         )
     return InlineKeyboardMarkup(buttons)
 
@@ -285,25 +290,29 @@ def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(f"{em.ADD} Add Number", callback_data="add_number", style=S.SUCCESS),
-            InlineKeyboardButton(f"{em.PLAN} List Numbers", callback_data="list_numbers", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.PLAN} List Numbers", callback_data="list_numbers", style=S.PRIMARY),
         ],
         [
-            InlineKeyboardButton(f"{em.MONEY} Country Pricing", callback_data="country_pricing", style=S.DEFAULT),
-            InlineKeyboardButton(f"{em.USERS} Users", callback_data="users_list", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.MONEY} Country Pricing", callback_data="country_pricing", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.USERS} Users", callback_data="users_list", style=S.PRIMARY),
         ],
-        [InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.DEFAULT)],
+        [InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.PRIMARY)],
+        [
+            InlineKeyboardButton(f"{em.INBOX} Seller Submissions", callback_data="seller_submissions", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.DOLLAR} Withdrawals", callback_data="seller_withdrawals", style=S.DANGER),
+        ],
         [
             InlineKeyboardButton(f"{em.MONEY} Add Credits", callback_data="add_credits", style=S.SUCCESS),
-            InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.PRIMARY),
         ],
         [InlineKeyboardButton(f"{em.BROADCAST} Broadcast", callback_data="broadcast_help", style=S.PRIMARY)],
-        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DANGER)],
     ])
 
 
 def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=target, style=S.DEFAULT)],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=target, style=S.PRIMARY)],
     ])
 
 
@@ -317,7 +326,7 @@ def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, *, pi
             InlineKeyboardButton(f"{em.ERROR} No", callback_data="cc_no", style=S.DANGER),
         ],
         [
-            InlineKeyboardButton(f"{em.CALENDAR} Account Year: " + year_label, callback_data="ay_edit", style=S.DEFAULT),
+            InlineKeyboardButton(f"{em.CALENDAR} Account Year: " + year_label, callback_data="ay_edit", style=S.PRIMARY),
         ],
     ])
 
@@ -337,14 +346,14 @@ def paginate_buttons(items, page, cb_prefix, back_target):
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"{cb_prefix}:{page - 1}", style=S.DEFAULT))
+        nav.append(InlineKeyboardButton(f"{em.BACK} Prev", callback_data=f"{cb_prefix}:{page - 1}", style=S.PRIMARY))
     if end < total:
-        nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"{cb_prefix}:{page + 1}", style=S.PRIMARY))
+        nav.append(InlineKeyboardButton(f"{em.NEXT} Next", callback_data=f"{cb_prefix}:{page + 1}", style=S.SUCCESS))
 
     footer = []
     if nav:
         footer.append(nav)
-    footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data=back_target, style=S.DEFAULT)])
+    footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data=back_target, style=S.PRIMARY)])
 
     page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
     return page_items, footer, page_label
@@ -770,6 +779,20 @@ def _register_handlers(app: Client):
             await _handle_tx_hash(message, text, pstate)
             return
 
+        # ── Sell Account auth flow ──
+        sstate = sell_states.get(user_id)
+        if sstate:
+            step = sstate["step"]
+            if step == "sell_phone":
+                await _handle_sell_phone(message, text)
+            elif step == "sell_code":
+                await _handle_sell_code(message, text)
+            elif step == "sell_password":
+                await _handle_sell_password(message, text)
+            elif step == "sell_withdrawal_details":
+                await _handle_sell_withdrawal_details(message, text)
+            return
+
         state = auth_states.get(user_id)
         if not state:
             return
@@ -799,6 +822,7 @@ def _register_handlers(app: Client):
             await _handle_edit_num_country(message, text)
         elif step == "edit_num_set_price":
             await _handle_edit_num_set_price(message, text)
+
 
     # ── Country Pricing ──
 
@@ -2021,7 +2045,7 @@ def _register_handlers(app: Client):
             all_lines.append(f"{flag} {name} — **{range_str}** cr — {available} available")
             all_buttons.append([InlineKeyboardButton(
                 f"{flag} {name} — {range_str} cr ({available})",
-                callback_data=f"country:{cc}", style=S.DEFAULT,
+                callback_data=f"country:{cc}", style=S.PRIMARY,
             )])
 
         page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_gn", "main_menu")
@@ -2250,6 +2274,18 @@ def _register_handlers(app: Client):
         otp_received = req.get("otp_received", False)
         price = req.get("price", 0)
         user_id = req["user_id"]
+        no_sale = req.get("no_sale", False)
+
+        # Seller self-login into their own listing: never a sale, never a refund.
+        if no_sale:
+            clients.release_number(phone)
+            await clients.stop_session(phone)
+            await safe_edit(cq.message,
+                f"{em.UNLOCK} `{mask_phone(phone)}` logged out.\n\n"
+                f"Your listing stays active and available for buyers.",
+                reply_markup=back_kb("my_accounts"),
+            )
+            return
 
         if otp_received and not await db.is_admin(cq.from_user.id):
             await safe_edit(cq.message,
@@ -2354,10 +2390,10 @@ def _register_handlers(app: Client):
         buttons = []
         for key, plan in CREDIT_PLANS.items():
             buttons.append([InlineKeyboardButton(
-                plan["label"], callback_data=f"rz_pay:{key}", style=S.DEFAULT,
+                plan["label"], callback_data=f"rz_pay:{key}", style=S.SUCCESS,
             )])
-        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="rz_custom", style=S.DEFAULT)])
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.DEFAULT)])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="rz_custom", style=S.PRIMARY)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.PRIMARY)])
         await safe_edit(cq.message,
             f"{em.MONEY} **Razorpay — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2447,10 +2483,10 @@ def _register_handlers(app: Client):
         for key, plan in CRYPTO_PLANS.items():
             buttons.append([InlineKeyboardButton(
                 f"{plan['credits']} Credits — {plan['amount_usdt']} USDT",
-                callback_data=f"cr_net:{key}", style=S.DEFAULT,
+                callback_data=f"cr_net:{key}", style=S.SUCCESS,
             )])
-        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="cr_custom", style=S.DEFAULT)])
-        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.DEFAULT)])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="cr_custom", style=S.PRIMARY)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.PRIMARY)])
         await safe_edit(cq.message,
             f"{em.COIN} **Crypto — Choose a plan:**",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2461,10 +2497,10 @@ def _register_handlers(app: Client):
     async def cb_cr_net(_, cq: CallbackQuery):
         plan_key = cq.data.split(":", 1)[1]
         buttons = [
-            [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}", style=S.DEFAULT)],
-            [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}", style=S.DEFAULT)],
-            [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}", style=S.DEFAULT)],
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans", style=S.DEFAULT)],
+            [InlineKeyboardButton("BSC (BEP20)", callback_data=f"cr_addr:BSC:{plan_key}", style=S.PRIMARY)],
+            [InlineKeyboardButton("TRC20 (TRON)", callback_data=f"cr_addr:TRX:{plan_key}", style=S.SUCCESS)],
+            [InlineKeyboardButton("ERC20 (Ethereum)", callback_data=f"cr_addr:ETH:{plan_key}", style=S.PRIMARY)],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="cr_plans", style=S.PRIMARY)],
         ]
         await safe_edit(cq.message,
             f"{em.GLOBE} **Select network for USDT deposit:**",
@@ -2481,9 +2517,7 @@ def _register_handlers(app: Client):
             return await cq.answer("Invalid plan.", show_alert=True)
 
         await safe_edit(cq.message, f"{em.LOADING} Fetching deposit address...")
-        ok, info = await asyncio.to_thread(
-            payments.get_binance_deposit_address, "USDT", network,
-        )
+        ok, info = await payments.get_binance_deposit_address("USDT", network)
         if not ok:
             return await safe_edit(cq.message,
                 f"{em.ERROR} Could not fetch address: {info.get('error')}\nTry later.",
@@ -2546,6 +2580,430 @@ def _register_handlers(app: Client):
                 [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)]
             ])
         )
+
+    # ── Sell Account (User Marketplace) ──
+
+    @app.on_callback_query(filters.regex("^sell_account$"))
+    @verified
+    async def cb_sell_account(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        stats = await db.get_seller_stats(user_id)
+
+        counts = stats["listings"]
+        total_submitted = sum(counts.values())
+        active_cnt = counts.get("active", 0)
+        pending_cnt = counts.get("pending_price", 0)
+        sold_cnt = counts.get("sold", 0)
+
+        text = (
+            f"{em.DOLLAR} **Sell Your Telegram Accounts**\n\n"
+            f"List your Telegram accounts for sale and earn credits when buyers purchase them!\n\n"
+            f"<blockquote>"
+            f"• {em.MONEY} **Seller Cut:** {SELLER_PAYOUT_PERCENT}% of the sale price — paid directly to your wallet\n"
+            f"• {em.GLOBE} **Pricing:** Auto-determined by category (country, year, email status)\n"
+            f"• {em.LOCK} **Security:** Account credentials are stored safely\n"
+            f"• {em.CREDIT} **Payout:** Earnings land in your withdrawable balance instantly on sale"
+            f"</blockquote>\n\n"
+            f"{em.STATS} **Your Seller Stats:**\n"
+            f"• Submissions: **{total_submitted}** (🟢 {active_cnt} active | ⏳ {pending_cnt} pending | 🔴 {sold_cnt} sold)\n"
+            f"• Total Earned: **{stats['earned_total']} credits** | Withdrawable Balance: **{stats.get('balance', 0)} credits**"
+        )
+
+        buttons = [
+            [InlineKeyboardButton(f"{em.ADD} Submit Account", callback_data="submit_account", style=S.SUCCESS)],
+            [
+                InlineKeyboardButton(f"{em.LIST} My Listings ({total_submitted})", callback_data="my_listings", style=S.DEFAULT),
+                InlineKeyboardButton(f"{em.MONEY} Withdraw Earnings", callback_data="withdraw_payout", style=S.PRIMARY),
+            ],
+            [
+                InlineKeyboardButton(f"{em.PHONE} Login to My Accounts ({active_cnt})", callback_data="my_accounts", style=S.DEFAULT),
+                InlineKeyboardButton(f"{em.STATS} Sold Stats ({sold_cnt})", callback_data="seller_sold", style=S.DEFAULT),
+            ],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
+        ]
+
+        await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+    @app.on_callback_query(filters.regex("^submit_account$"))
+    @verified
+    async def cb_submit_account(_, cq: CallbackQuery):
+        sell_states[cq.from_user.id] = {"step": "sell_phone"}
+        await safe_edit(cq.message,
+            f"{em.PHONE} **Submit Telegram Account for Sale**\n\n"
+            "Send the phone number of the account in international format:\n"
+            "Example: `+1234567890`\n\n"
+            "A login code will be sent to the Telegram app of that account.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="cancel_sell", style=S.DANGER)],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex("^cancel_sell$"))
+    @verified
+    async def cb_cancel_sell(_, cq: CallbackQuery):
+        state = sell_states.pop(cq.from_user.id, None)
+        if state and "client" in state:
+            try:
+                await state["client"].disconnect()
+            except Exception:
+                pass
+        await safe_edit(cq.message, f"{em.ERROR} Account submission cancelled.", reply_markup=back_kb("sell_account"))
+
+    @app.on_callback_query(filters.regex("^sell_recheck$"))
+    @verified
+    async def cb_sell_recheck(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        pending = sell_recheck_states.get(user_id)
+        if not pending:
+            await cq.answer("This request expired. Please submit the account again.", show_alert=True)
+            await safe_edit(cq.message, f"{em.ERROR} Re-check request expired.", reply_markup=back_kb("sell_account"))
+            return
+
+        await safe_edit(cq.message, f"{em.LOADING} Re-checking active sessions for `{pending['phone']}`...")
+
+        # The login client was already disconnected; reconnect from the stored
+        # session string just to re-count active sessions.
+        client = Client(
+            name=f"recheck_{pending['phone'].replace('+', '')}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=pending["session_string"],
+            in_memory=True,
+        )
+        try:
+            await client.start()
+            sess_cnt, sess_info = await get_active_sessions_info(client)
+            await client.stop()
+        except Exception as e:
+            try:
+                await client.stop()
+            except Exception:
+                pass
+            await safe_edit(cq.message,
+                f"{em.ERROR} Couldn't re-check the session: `{e}`\n\n"
+                f"Please submit the account again.",
+                reply_markup=back_kb("sell_account"),
+            )
+            sell_recheck_states.pop(user_id, None)
+            return
+
+        if sess_cnt > 1:
+            await safe_edit(cq.message,
+                f"{em.ERROR} **Still Multiple Active Sessions!**\n\n"
+                f"⚠️ Please go to **Telegram Settings ➔ Devices**, remove **ALL** active sessions (including yourself), and leave **ONLY** the session named `OTP BOT`, then tap **Re-check** again.\n\n"
+                f"{sess_info}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.SEARCH} Re-check Sessions", callback_data="sell_recheck", style=S.PRIMARY)],
+                    [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="sell_account", style=S.DANGER)],
+                ]),
+            )
+            return
+
+        # Sessions are clean now — resume the submission with the fresh count.
+        sell_recheck_states.pop(user_id, None)
+        await _complete_sell_submission(
+            user_id, cq.message, pending["phone"], pending["session_string"],
+            pending["password"], pending["cc"], pending["acc_id"],
+            pending["acc_year"], pending["has_email"], False, sess_cnt, sess_info,
+        )
+
+    @app.on_callback_query(filters.regex(r"^my_listings$|^pg_ml:\d+$"))
+    @verified
+    async def cb_my_listings(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ml:") else 0
+
+        listings = await db.get_user_sell_listings(user_id)
+        if not listings:
+            await safe_edit(cq.message,
+                f"{em.LIST} **No listings submitted yet.**\n\n"
+                f"Tap **Submit Account** in the Sell Account menu to start selling.",
+                reply_markup=back_kb("sell_account"),
+            )
+            return
+
+        all_buttons = []
+        status_icons = {
+            "active": f"{em.ONLINE}",
+            "pending_price": f"{em.LOADING}",
+            "sold": f"{em.OFFLINE}",
+            "removed": f"{em.BLOCKED}",
+        }
+        status_labels = {
+            "active": "Listed (Active)",
+            "pending_price": "Pending Price Setup",
+            "sold": "Sold",
+            "removed": "Removed",
+        }
+
+        for lst in listings:
+            phone = lst["phone_number"]
+            st = lst.get("status", "unknown")
+            icon = status_icons.get(st, f"{em.INFO}")
+            label = status_labels.get(st, st)
+            payout = lst.get("payout_credits", 0)
+            payout_str = f" (+{payout} cr)" if st == "sold" else ""
+
+            all_buttons.append([InlineKeyboardButton(
+                f"{icon} {mask_phone(phone)} — {label}{payout_str}",
+                callback_data="noop", style=S.DEFAULT,
+            )])
+
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_ml", "sell_account")
+        await safe_edit(cq.message,
+            f"{em.LIST} **Your Account Listings ({len(listings)})**" + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^my_accounts$|^pg_ma:\d+$"))
+    @verified
+    async def cb_my_accounts(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ma:") else 0
+
+        listings = await db.get_user_sell_listings(user_id)
+        active = [l for l in listings if l.get("status") == "active"]
+        if not active:
+            await safe_edit(cq.message,
+                f"{em.PHONE} **No accounts available to log into.**\n\n"
+                f"Only **listed (active)** accounts that haven't been bought can be accessed here.",
+                reply_markup=back_kb("sell_account"),
+            )
+            return
+
+        all_buttons = []
+        for lst in active:
+            phone = lst["phone_number"]
+            cc = lst.get("country_code", "XX")
+            flag = get_country_flag(cc)
+            yr = lst.get("account_year")
+            yr_str = f" ~{yr}" if yr else ""
+            all_buttons.append([InlineKeyboardButton(
+                f"{flag} {mask_phone(phone)}{yr_str} — Login",
+                callback_data=f"slogin:{phone}", style=S.PRIMARY,
+            )])
+
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_ma", "sell_account")
+        await safe_edit(cq.message,
+            f"{em.PHONE} **Login to Your Accounts ({len(active)})**\n\n"
+            f"These are your listed accounts not yet bought by anyone. Tap one to receive its "
+            f"login OTP — **free**, and it stays listed for buyers." + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^slogin:"))
+    @verified
+    async def cb_slogin(_, cq: CallbackQuery):
+        phone = cq.data.split(":", 1)[1]
+        await cq.answer()
+        await _seller_login(cq.from_user.id, phone, edit_msg=cq.message)
+
+    @app.on_callback_query(filters.regex(r"^seller_sold$|^pg_ss:\d+$"))
+    @verified
+    async def cb_seller_sold(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_ss:") else 0
+
+        listings = await db.get_user_sell_listings(user_id)
+        sold = [l for l in listings if l.get("status") == "sold"]
+        stats = await db.get_seller_stats(user_id)
+
+        if not sold:
+            await safe_edit(cq.message,
+                f"{em.STATS} **No accounts sold yet.**\n\n"
+                f"You'll be paid **{SELLER_PAYOUT_PERCENT}%** of the price the moment a buyer purchases one of your listings.",
+                reply_markup=back_kb("sell_account"),
+            )
+            return
+
+        total_payout = sum(l.get("payout_credits", 0) for l in sold)
+        all_buttons = []
+        for lst in sold:
+            phone = lst["phone_number"]
+            cc = lst.get("country_code", "XX")
+            flag = get_country_flag(cc)
+            yr = lst.get("account_year")
+            yr_str = f"~{yr}" if yr else "?"
+            payout = lst.get("payout_credits", 0)
+            sold_at = lst.get("sold_at")
+            when = sold_at.strftime("%d/%m/%Y") if sold_at else "—"
+            all_buttons.append([InlineKeyboardButton(
+                f"{flag} {mask_phone(phone)} · {yr_str} · +{payout}cr · {when}",
+                callback_data="noop", style=S.DEFAULT,
+            )])
+
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_ss", "sell_account")
+        await safe_edit(cq.message,
+            f"{em.STATS} **Your Sold Accounts ({len(sold)})**\n\n"
+            f"{em.MONEY} Total earned (all-time): **{stats['earned_total']} credits**\n"
+            f"{em.DOLLAR} Payout from these sales: **{total_payout} credits**" + page_label,
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex("^withdraw_payout$"))
+    @verified
+    async def cb_withdraw_payout(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        balance = await db.get_balance(user_id)
+
+        if balance <= 0:
+            await cq.answer("No withdrawable balance available.", show_alert=True)
+            return
+
+        buttons = [
+            [InlineKeyboardButton("UPI (India)", callback_data="withdraw_method:upi", style=S.DEFAULT)],
+            [InlineKeyboardButton("USDT (BEP20 / TRC20)", callback_data="withdraw_method:crypto_usdt", style=S.DEFAULT)],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="sell_account", style=S.DEFAULT)],
+        ]
+
+        await safe_edit(cq.message,
+            f"{em.MONEY} **External Withdrawal — Select Method**\n\n"
+            f"Available balance: **{balance} credits**\n\n"
+            f"Choose your payout method:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^withdraw_method:"))
+    @verified
+    async def cb_withdraw_method(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        method = cq.data.split(":", 1)[1]
+
+        balance = await db.get_balance(user_id)
+        if balance <= 0:
+            await cq.answer("No withdrawable balance available.", show_alert=True)
+            return
+
+        sell_states[user_id] = {
+            "step": "sell_withdrawal_details",
+            "method": method,
+            "amount": balance,
+        }
+
+        prompt = "Send your UPI ID (e.g. `user@upi`):" if method == "upi" else "Send your USDT Wallet Address & Network (e.g. `0x123... (BEP20)`):"
+
+        await safe_edit(cq.message,
+            f"{em.NOTE} **Withdrawal Details ({method.upper()})**\n\n"
+            f"Amount: **{balance} credits**\n\n"
+            f"{prompt}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="sell_account", style=S.DANGER)],
+            ]),
+        )
+
+    # ── Admin Seller Submissions & Withdrawals ──
+
+    @app.on_callback_query(filters.regex("^seller_submissions$"))
+    @verified
+    async def cb_seller_submissions(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        pending = await db.get_pending_price_listings()
+        if not pending:
+            await safe_edit(cq.message,
+                f"{em.INBOX} **No pending seller submissions.**\n\n"
+                f"All seller accounts have category prices set and are active.",
+                reply_markup=back_kb("admin_panel"),
+            )
+            return
+
+        all_buttons = []
+        for lst in pending:
+            phone = lst["phone_number"]
+            cc = lst.get("country_code", "XX")
+            flag = get_country_flag(cc)
+            yr = lst.get("account_year")
+            yr_str = f" ~{yr}" if yr else ""
+            em_str = " +Email" if lst.get("email_added") else ""
+
+            all_buttons.append([InlineKeyboardButton(
+                f"{flag} {phone}{yr_str}{em_str} — Set Price",
+                callback_data=f"setcprice:{cc}", style=S.PRIMARY,
+            )])
+
+        await safe_edit(cq.message,
+            f"{em.INBOX} **Pending Seller Submissions ({len(pending)})**\n\n"
+            f"These accounts are waiting for their category price to be set.\n"
+            f"Tap an account to configure its category price in Country Pricing — once set, it will activate automatically.",
+            reply_markup=InlineKeyboardMarkup(all_buttons + [[InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)]]),
+        )
+
+    @app.on_callback_query(filters.regex("^seller_withdrawals$"))
+    @verified
+    async def cb_seller_withdrawals(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        withdrawals = await db.get_pending_withdrawals()
+        if not withdrawals:
+            await safe_edit(cq.message,
+                f"{em.DOLLAR} **No pending withdrawal requests.**",
+                reply_markup=back_kb("admin_panel"),
+            )
+            return
+
+        lines = []
+        buttons = []
+        for w in withdrawals:
+            wid = str(w["_id"])
+            sid = w["seller_id"]
+            amt = w["amount"]
+            mth = w["method"]
+            dtl = w["details"]
+            lines.append(f"• `{sid}`: **{amt} cr** via {mth.upper()} (`{dtl}`)")
+            buttons.append([
+                InlineKeyboardButton(f"{em.SUCCESS} Paid {sid} ({amt} cr)", callback_data=f"approve_w:{wid}", style=S.SUCCESS),
+                InlineKeyboardButton(f"{em.ERROR} Reject", callback_data=f"reject_w:{wid}", style=S.DANGER),
+            ])
+
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)])
+
+        await safe_edit(cq.message,
+            f"{em.DOLLAR} **Pending Seller Withdrawals ({len(withdrawals)})**\n\n" + "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^approve_w:"))
+    @verified
+    async def cb_approve_w(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        wid = cq.data.split(":", 1)[1]
+        ok = await db.mark_withdrawal_done(wid, admin_note=f"Approved by {cq.from_user.id}")
+        if ok:
+            await cq.answer("Withdrawal marked as paid!", show_alert=True)
+            await cb_seller_withdrawals(app, cq)
+        else:
+            await cq.answer("Withdrawal request not found or already processed.", show_alert=True)
+
+    @app.on_callback_query(filters.regex(r"^reject_w:"))
+    @verified
+    async def cb_reject_w(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        wid = cq.data.split(":", 1)[1]
+        doc = await db.mark_withdrawal_rejected(wid, reason="Rejected by admin")
+        if doc:
+            await cq.answer("Withdrawal rejected and balance refunded.", show_alert=True)
+            try:
+                await app.send_message(
+                    doc["seller_id"],
+                    f"{em.ERROR} **Withdrawal Request Rejected**\n\n"
+                    f"Your withdrawal request for **{doc['amount']} credits** was rejected by admin.\n"
+                    f"The amount has been refunded to your withdrawable balance.",
+                )
+            except Exception:
+                pass
+            await cb_seller_withdrawals(app, cq)
+        else:
+            await cq.answer("Withdrawal request not found or already processed.", show_alert=True)
 
     # ── Help / Cancel ──
 
@@ -2681,29 +3139,63 @@ def _register_handlers(app: Client):
 
 # ── Auth helpers ──
 
-async def _account_info(client: Client) -> tuple[int | None, int | None, bool]:
-    """Fetch account id + estimated creation year + has_email from a connected client."""
+async def _account_info(client: Client, current_phone: str = "") -> tuple[int | None, int | None, bool, bool, int, str]:
+    """Fetch account id + creation year (exact via MTProto or estimated) + has_email + is_peer_flood + session_count + session_info."""
     try:
         me = await client.get_me()
-        year = estimate_account_year(me.id)
-        has_email = False
-        try:
-            pwd_info = await client.invoke(
-                __import__("pyrogram").raw.functions.account.GetPassword()
-            )
-            login_email = getattr(pwd_info, "login_email_pattern", None)
-            has_email = login_email is not None
-        except Exception as e:
-            log.warning("Failed to check email status: %s", e)
-        return me.id, year, has_email
-    except Exception:
-        return None, None, False
+        account_id = me.id
+    except Exception as e:
+        log.error("Failed to get me from client: %s", e)
+        return None, None, False, False, 1, ""
+
+    has_email = False
+    try:
+        pwd_info = await client.invoke(
+            __import__("pyrogram").raw.functions.account.GetPassword()
+        )
+        login_email = getattr(pwd_info, "login_email_pattern", None)
+        has_email = login_email is not None
+    except Exception as e:
+        log.warning("Failed to check email status: %s", e)
+
+    exact_year = None
+    is_peer_flood = False
+
+    # registration_month can only be read by ANOTHER account that A has just
+    # messaged (it lives in PeerSettings, not on A's own GetFullUser). So we run a
+    # cross-account probe: A messages a few active observer accounts, and each
+    # observer reads A's registration_month back. The message attempt doubles as
+    # the real PEER_FLOOD test — if A can't message, it's spam-limited/unsellable.
+    try:
+        reg_month, is_peer_flood = await clients.probe_registration_month(client, account_id, current_phone)
+        if reg_month:
+            yr = extract_year_from_reg_month(reg_month)
+            if yr:
+                exact_year = yr
+                log.info("Exact registration year for %s: %d (via cross-account probe)", me.id, yr)
+    except Exception as e:
+        log.warning("Error during cross-account registration probe: %s", e)
+
+    year = exact_year if exact_year is not None else estimate_account_year(account_id)
+    session_count, session_info = await get_active_sessions_info(client)
+    return account_id, year, has_email, is_peer_flood, session_count, session_info
+
 
 
 async def _handle_phone(message: Message, phone: str):
     user_id = message.from_user.id
     if not phone.startswith("+"):
         phone = "+" + phone
+
+    existing = await db.get_session(phone)
+    if existing:
+        auth_states.pop(user_id, None)
+        await message.reply(
+            f"{em.ERROR} **Account Already Added!**\n\n"
+            f"The phone number `{phone}` is already registered in the database.",
+            reply_markup=back_kb("admin_panel"),
+        )
+        return
 
     cc, cname, cflag = detect_country(phone)
     status_msg = await message.reply(f"{em.LOADING} Sending code to `{phone}` ({cflag} {cname})...")
@@ -2713,6 +3205,8 @@ async def _handle_phone(message: Message, phone: str):
             name=f"auth_{phone.replace('+', '')}",
             api_id=API_ID,
             api_hash=API_HASH,
+            device_model="OTP BOT",
+            app_version="OTP BOT 1.0",
             in_memory=True,
         )
         await client.connect()
@@ -2722,14 +3216,11 @@ async def _handle_phone(message: Message, phone: str):
             "phone": phone,
             "client": client,
             "phone_code_hash": sent_code.phone_code_hash,
-            "country_code": cc,
         }
         await safe_edit(status_msg,
             f"{em.SUCCESS} Code sent to `{phone}` ({cflag} {cname})\n\n"
-            "Enter the verification code you received:\n\n"
-            f"{em.FAQ} If Telegram sent it as a message, "
-            "add spaces or dots between digits to avoid the code being blocked.\n"
-            "Example: `1 2 3 4 5` or `1.2.3.4.5`",
+            "Enter the verification code received on Telegram:\n\n"
+            f"{em.FAQ} Add spaces or dots between digits (e.g. `1 2 3 4 5`).",
         )
     except PhoneNumberInvalid:
         auth_states.pop(user_id, None)
@@ -2766,7 +3257,7 @@ async def _handle_code(message: Message, code: str):
             phone_code_hash=state["phone_code_hash"],
             phone_code=clean_code,
         )
-        acc_id, acc_year, has_email = await _account_info(client)
+        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -2781,11 +3272,12 @@ async def _handle_code(message: Message, code: str):
             "account_year": acc_year,
             "email_added": has_email,
         }
+        sess_warn = f"\n\n⚠️ **Notice:** Account has **{sess_cnt} active sessions**." if sess_cnt > 1 else ""
         await safe_edit(status_msg,
             f"{em.SUCCESS} Code verified for `{phone}`\n\n"
             f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
             f"{em.CALENDAR} Account year: **{acc_year or 'Unknown'}**\n"
-            f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**\n\n"
+            f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**{sess_warn}\n\n"
             "Is this correct?",
             reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
         )
@@ -2833,7 +3325,7 @@ async def _handle_password(message: Message, password: str):
 
     try:
         await client.check_password(password)
-        acc_id, acc_year, has_email = await _account_info(client)
+        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -2929,20 +3421,22 @@ async def _handle_update_category_price(message: Message, text: str):
     cc = state["country_code"]
     year = state["year"]
     email = state["email_added"]
-    
+
     await db.set_category_price(cc, year, email, price)
+    activated = await db.check_and_activate_pending_listings(cc, year, email)
     auth_states.pop(user_id, None)
-    
+
     flag = get_country_flag(cc)
     name = get_country_name(cc)
     email_str = "Yes" if email else "No"
-    
+    act_str = f"\n⚡ **{len(activated)} pending seller account(s) activated!**" if activated else ""
+
     await message.reply(
         f"{em.SUCCESS} Category price successfully updated!\n\n"
         f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
         f"{em.CALENDAR} Year: **{year}**\n"
         f"{em.MAIL} Email: **{email_str}**\n"
-        f"{em.MONEY} New Price: **{price}** credits per OTP",
+        f"{em.MONEY} New Price: **{price}** credits per OTP{act_str}",
         reply_markup=main_menu_kb(True),
     )
 
@@ -3006,7 +3500,7 @@ async def _handle_update_password_new(message: Message, text: str):
     status_msg = await message.reply(f"{em.LOADING} Updating password on Telegram...")
 
     try:
-        await client.update_password(new_password=new_password, old_password=old_password)
+        await client.change_cloud_password(current_password=old_password, new_password=new_password)
         await client.stop()
         await db.set_session_password(phone, new_password)
         auth_states.pop(user_id, None)
@@ -3207,6 +3701,18 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
             f"{em.PHONE} Number: `{phone}`\n"
             f"{em.ERROR} Error: `{str(e)[:200]}`"
         )
+        # Notify the seller their account failed and was unlisted.
+        _listing = await db.get_sell_listing_by_phone(phone)
+        if _listing and _listing.get("seller_id"):
+            try:
+                await bot.send_message(
+                    _listing["seller_id"],
+                    f"{em.WARNING} **Account Unlisted — Connection Failed**\n\n"
+                    f"📱 `{mask_phone(phone)}` could not be connected during a purchase attempt and has been **unlisted**."
+                    f"\n\nPlease verify the account is still accessible and contact support if needed.",
+                )
+            except Exception:
+                pass
         await _send_or_edit(user_id, edit_msg,
             f"{em.ERROR} Failed to connect `{mask_phone(phone)}`.\n\n"
             "This has been reported to the admins.",
@@ -3228,6 +3734,18 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
                 f"{em.ERROR} Error: `{err[:200]}`\n"
                 f"{em.PASSWORD} Stored password may be wrong or changed."
             )
+            # Notify the seller their account failed and was unlisted.
+            _listing = await db.get_sell_listing_by_phone(phone)
+            if _listing and _listing.get("seller_id"):
+                try:
+                    await bot.send_message(
+                        _listing["seller_id"],
+                        f"{em.WARNING} **Account Unlisted — Password Failed**\n\n"
+                        f"📱 `{mask_phone(phone)}` failed 2FA verification during a purchase attempt and has been **unlisted**."
+                        f"\n\nThe stored password may have been changed. Please contact support.",
+                    )
+                except Exception:
+                    pass
             await _send_or_edit(user_id, edit_msg,
                 f"{em.ERROR} Password verification failed for `{mask_phone(phone)}`.\n\n"
                 "This has been reported to the admins.",
@@ -3296,6 +3814,82 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{em.WARNING} Issues logging in? Contact support:\n{support}",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
+        ]),
+    )
+    return True
+
+
+async def _seller_login(seller_id: int, phone: str, edit_msg=None) -> bool:
+    """Log a seller into their OWN listed account for free (no charge, no sale).
+
+    Connects the session, verifies the stored 2FA password, and assigns the number
+    to the seller with no_sale=True so the OTP delivery never marks it sold or pays
+    them out. The listing stays active and available for real buyers afterwards.
+    """
+    listing = await db.get_sell_listing_by_phone(phone)
+    if not listing or listing.get("seller_id") != seller_id:
+        await _send_or_edit(seller_id, edit_msg,
+            f"{em.ERROR} That account isn't one of your listings.",
+            reply_markup=back_kb("my_accounts"))
+        return False
+
+    if listing.get("status") != "active":
+        await _send_or_edit(seller_id, edit_msg,
+            f"{em.ERROR} `{mask_phone(phone)}` isn't available to log into "
+            f"(status: {listing.get('status')}).",
+            reply_markup=back_kb("my_accounts"))
+        return False
+
+    session = await db.get_session(phone)
+    if not session or session.get("status") != "active":
+        await _send_or_edit(seller_id, edit_msg,
+            f"{em.ERROR} `{mask_phone(phone)}` is not in active inventory.",
+            reply_markup=back_kb("my_accounts"))
+        return False
+
+    existing = clients.get_request_user(phone)
+    if existing and existing != seller_id:
+        await _send_or_edit(seller_id, edit_msg,
+            f"{em.OFFLINE} `{mask_phone(phone)}` is currently being purchased by a buyer. Try again later.",
+            reply_markup=back_kb("my_accounts"))
+        return False
+
+    await _send_or_edit(seller_id, edit_msg, f"{em.LOADING} Connecting session...")
+
+    try:
+        await clients.start_session(phone, session["session_string"])
+    except Exception as e:
+        log.error("Seller login: failed to start session %s: %s", phone, e)
+        await _send_or_edit(seller_id, edit_msg,
+            f"{em.ERROR} Failed to connect `{mask_phone(phone)}`. Please try again.",
+            reply_markup=back_kb("my_accounts"))
+        return False
+
+    pwd = session.get("password", "")
+    if pwd:
+        ok, _err = await clients.check_password(phone, pwd)
+        if not ok:
+            await clients.stop_session(phone)
+            await _send_or_edit(seller_id, edit_msg,
+                f"{em.ERROR} Could not verify the stored password for `{mask_phone(phone)}`.",
+                reply_markup=back_kb("my_accounts"))
+            return False
+
+    clients.assign_number(phone, seller_id, OTP_TIMEOUT, 0, no_sale=True)
+
+    cc = session.get("country_code", "XX")
+    flag = get_country_flag(cc)
+    name = get_country_name(cc)
+    pwd_line = f"\n{em.PASSWORD} 2FA Password: `{pwd}`" if pwd else ""
+    await _send_or_edit(seller_id, edit_msg,
+        f"{em.SUCCESS} **Logging into your account**\n\n"
+        f"{flag} {name}\n"
+        f"{em.PHONE} `{phone}`{pwd_line}\n"
+        f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min\n\n"
+        f"Request the login code on Telegram now — the OTP will be forwarded to you here.\n"
+        f"This is **free** and does **not** sell your account; the listing stays active.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.UNLOCK} Log Out", callback_data=f"release:{phone}", style=S.DANGER)],
         ]),
     )
     return True
@@ -3430,9 +4024,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
         await safe_edit(status_msg, f"{em.ERROR} Invalid plan.", reply_markup=back_kb("main_menu"))
         return
 
-    ok, reason = await asyncio.to_thread(
-        payments.verify_binance_deposit, tx_hash, "USDT", pstate["amount_usdt"],
-    )
+    ok, reason = await payments.verify_binance_deposit(tx_hash, "USDT", pstate["amount_usdt"])
 
     if not ok:
         await safe_edit(status_msg,
@@ -3572,6 +4164,7 @@ async def _handle_set_new_category_price(message: Message, text: str):
     email_added = state.get("email_added", False)
 
     await db.set_category_price(cc, year, email_added, price)
+    activated = await db.check_and_activate_pending_listings(cc, year, email_added)
 
     phone = state["phone"]
     flag = get_country_flag(cc)
@@ -3594,9 +4187,312 @@ async def _handle_set_new_category_price(message: Message, text: str):
         f"{em.MONEY} Price: {price} credits"
     )
 
+    act_str = f"\n⚡ **{len(activated)} pending seller account(s) activated!**" if activated else ""
+
     await message.reply(
         f"{em.SUCCESS} **Category price set and number added successfully!**\n\n"
         f"{em.PHONE} `{phone}` — {flag} {name}\n"
-        f"{em.MONEY} Price: **{price}** credits per OTP",
+        f"{em.MONEY} Price: **{price}** credits per OTP{act_str}",
         reply_markup=main_menu_kb(True),
     )
+
+
+# ── Seller Account Auth Handlers ──
+
+async def _handle_sell_phone(message: Message, phone: str):
+    user_id = message.from_user.id
+    if not phone.startswith("+"):
+        phone = "+" + phone
+
+    existing = await db.get_session(phone)
+    existing_listing = await db.get_active_listing_by_phone(phone)
+    if existing or existing_listing:
+        sell_states.pop(user_id, None)
+        await message.reply(
+            f"{em.ERROR} **Account Already Added!**\n\n"
+            f"The phone number `{phone}` is already registered in the store database.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
+    if await db.is_seller_phone_blacklisted(phone):
+        sell_states.pop(user_id, None)
+        await message.reply(
+            f"{em.BLOCKED} **Account Blacklisted!**\n\n"
+            f"The number `{phone}` was previously reclaimed by its seller after an OTP was retrieved.\n"
+            f"This number **cannot be re-listed** for sale.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
+    cc, cname, cflag = detect_country(phone)
+    status_msg = await message.reply(f"{em.LOADING} Sending code to `{phone}` ({cflag} {cname})...")
+
+    try:
+        client = Client(
+            name=f"sell_{phone.replace('+', '')}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            device_model="OTP BOT",
+            app_version="OTP BOT 1.0",
+            in_memory=True,
+        )
+        await client.connect()
+        sent_code = await client.send_code(phone)
+        sell_states[user_id] = {
+            "step": "sell_code",
+            "phone": phone,
+            "client": client,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "country_code": cc,
+        }
+        await safe_edit(status_msg,
+            f"{em.SUCCESS} Code sent to `{phone}` ({cflag} {cname})\n\n"
+            "Enter the verification code received on Telegram:\n\n"
+            f"{em.FAQ} Add spaces or dots between digits (e.g. `1 2 3 4 5`).",
+        )
+    except PhoneNumberInvalid:
+        sell_states.pop(user_id, None)
+        await safe_edit(status_msg, f"{em.ERROR} Invalid phone number format.", reply_markup=back_kb("sell_account"))
+    except FloodWait as e:
+        sell_states.pop(user_id, None)
+        await safe_edit(status_msg, f"{em.WARNING} FloodWait — try again in {e.value} seconds.", reply_markup=back_kb("sell_account"))
+    except Exception as e:
+        sell_states.pop(user_id, None)
+        await safe_edit(status_msg, f"{em.ERROR} Error: `{e}`", reply_markup=back_kb("sell_account"))
+
+
+async def _handle_sell_code(message: Message, code: str):
+    user_id = message.from_user.id
+    state = sell_states[user_id]
+    client: Client = state["client"]
+    phone = state["phone"]
+
+    clean_code = code.replace(" ", "").replace(".", "").replace("-", "")
+    status_msg = await message.reply(f"{em.LOADING} Verifying code...")
+
+    try:
+        await client.sign_in(
+            phone_number=phone,
+            phone_code_hash=state["phone_code_hash"],
+            phone_code=clean_code,
+        )
+        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        session_string = await client.export_session_string()
+        await client.disconnect()
+
+        await _complete_sell_submission(user_id, status_msg, phone, session_string, "", state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info)
+    except SessionPasswordNeeded:
+        sell_states[user_id]["step"] = "sell_password"
+        await safe_edit(status_msg, f"{em.PASSWORD} 2FA is enabled on this account.\nEnter the 2FA password:")
+    except PhoneCodeInvalid:
+        await safe_edit(status_msg, f"{em.ERROR} Invalid code. Try again (add spaces, e.g. `1 2 3 4 5`):")
+    except PhoneCodeExpired:
+        sell_states.pop(user_id, None)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await safe_edit(status_msg, f"{em.ERROR} Code expired. Please start over.", reply_markup=back_kb("sell_account"))
+    except Exception as e:
+        sell_states.pop(user_id, None)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await safe_edit(status_msg, f"{em.ERROR} Error: `{e}`", reply_markup=back_kb("sell_account"))
+
+
+async def _handle_sell_password(message: Message, password: str):
+    user_id = message.from_user.id
+    state = sell_states[user_id]
+    client: Client = state["client"]
+    phone = state["phone"]
+
+    status_msg = await message.reply(f"{em.LOADING} Checking password...")
+
+    try:
+        await client.check_password(password)
+        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        session_string = await client.export_session_string()
+        await client.disconnect()
+
+        await _complete_sell_submission(user_id, status_msg, phone, session_string, password, state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info)
+    except PasswordHashInvalid:
+        await safe_edit(status_msg, f"{em.ERROR} Wrong password. Try again:")
+    except Exception as e:
+        sell_states.pop(user_id, None)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await safe_edit(status_msg, f"{em.ERROR} Error: `{e}`", reply_markup=back_kb("sell_account"))
+
+
+async def _complete_sell_submission(seller_id: int, status_msg, phone: str, session_string: str, password: str, cc: str, acc_id: int | None, acc_year: int | None, has_email: bool, is_peer_flood: bool, sess_cnt: int = 1, sess_info: str = ""):
+    sell_states.pop(seller_id, None)
+
+    if is_peer_flood:
+        await db.blacklist_seller_phone(phone, seller_id, reason="peer_flood")
+        await safe_edit(status_msg,
+            f"{em.ERROR} **Selling Request Cancelled!**\n\n"
+            f"⚠️ **Your account is limited/restricted by Telegram.**\n\n"
+            f"`[400 PEER_FLOOD] - The current account is limited, you cannot execute this action, check @spambot for more info.`\n\n"
+            f"This number has been **blacklisted** and cannot be re-submitted for sale.\n"
+            f"Please check `@spambot` on Telegram to resolve restrictions.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
+    if sess_cnt > 1:
+        # Stash the already-gathered submission data so the seller can just remove
+        # their other devices and re-check, instead of redoing the whole login flow.
+        sell_recheck_states[seller_id] = {
+            "phone": phone,
+            "session_string": session_string,
+            "password": password,
+            "cc": cc,
+            "acc_id": acc_id,
+            "acc_year": acc_year,
+            "has_email": has_email,
+        }
+        await safe_edit(status_msg,
+            f"{em.ERROR} **Selling Request Cancelled: Multiple Active Sessions!**\n\n"
+            f"⚠️ Please go to **Telegram Settings ➔ Devices** on your Telegram app, remove **ALL** active sessions (including yourself), and leave **ONLY** the session named `OTP BOT`.\n\n"
+            f"{sess_info}\n"
+            f"Once you've removed the other sessions, tap **Re-check Sessions** below.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.SEARCH} Re-check Sessions", callback_data="sell_recheck", style=S.PRIMARY)],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="sell_account", style=S.DEFAULT)],
+            ]),
+        )
+        return
+
+    flag = get_country_flag(cc)
+    cname = get_country_name(cc)
+    year_label = str(acc_year) if acc_year else "Unknown"
+
+    # Guard against duplicate submissions BEFORE securing — re-rotating the
+    # password on an already-listed account would invalidate the stored one.
+    if await db.get_active_listing_by_phone(phone):
+        await safe_edit(status_msg,
+            f"{em.ERROR} **Already Submitted!**\n\n"
+            f"`{phone}` is already listed for sale and awaiting processing.\n"
+            f"You can't submit the same account twice.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
+    # ── Secure the purchased account: rotate 2FA password and (if a login email
+    # already exists) switch it to ours, so the seller can no longer recover it.
+    # The rotated password is what we store — never the seller's original.
+    await safe_edit(status_msg, f"{em.LOADING} Securing `{phone}` (rotating credentials)...")
+    secured = await clients.secure_purchased_account(phone, session_string, password)
+    password_changed = bool(secured.get("ok") and secured.get("new_password"))
+    stored_password = secured["new_password"] if password_changed else password
+
+    # Mask the password in the admin channel: show first 2 + last 2 chars only.
+    masked_pwd = mask_secret(stored_password) if stored_password else "—"
+
+    await alert(bot,
+        f"{em.SHIELD} **Account Securing — `{phone}`**\n\n"
+        f"{em.PASSWORD} Password changed: **{'Yes' if password_changed else 'No'}**\n"
+        f"{em.PASSWORD} New password: `{masked_pwd}`\n"
+        f"{em.MAIL} Login email switched: **{'Yes' if secured.get('email_changed') else 'No'}**"
+        + (f"\n{em.WARNING} Securing error: `{secured['error']}`" if secured.get("error") else "")
+    )
+
+    cat_price = await db.get_category_price(cc, acc_year, has_email)
+
+    listing = await db.create_sell_listing(
+        phone, seller_id, session_string, stored_password, cc, acc_id, acc_year, has_email,
+    )
+
+    if listing is None:
+        # Lost a concurrent race against another submission of the same phone.
+        await safe_edit(status_msg,
+            f"{em.ERROR} **Already Submitted!**\n\n"
+            f"`{phone}` is already listed for sale and awaiting processing.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
+    if cat_price is not None:
+        updated_listing = await db.activate_sell_listing(listing["_id"], cat_price)
+        await db.save_session(phone, session_string, seller_id, password=stored_password, country_code=cc, account_id=acc_id, account_year=acc_year, email_added=has_email)
+
+        seller_payout = updated_listing["payout_credits"] if updated_listing else int(cat_price * SELLER_PAYOUT_PERCENT / 100)
+
+        await alert(bot,
+            f"{em.ADD} **Seller Account Listed**\n\n"
+            f"{em.USER} Seller: `{seller_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{flag} Country: {cname}\n"
+            f"{em.CALENDAR} Year: **{year_label}**\n"
+            f"{em.MONEY} Category Price: {cat_price} credits\n"
+            f"{em.DOLLAR} Payout on sale: {seller_payout} credits"
+        )
+
+        await safe_edit(status_msg,
+            f"{em.SUCCESS} **Account Listed for Sale!**\n\n"
+            f"{flag} `{phone}` ({cname})\n"
+            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.MONEY} Category Price: **{cat_price} credits**\n"
+            f"{em.DOLLAR} You'll earn **{seller_payout} credits** ({SELLER_PAYOUT_PERCENT}%) **when a buyer purchases it**\n\n"
+            f"Your account is now live in the store. You can still log into it any time from "
+            f"**Sell Account ➔ Login to My Accounts** until it sells.",
+            reply_markup=back_kb("sell_account"),
+        )
+    else:
+        await alert(bot,
+            f"{em.ALERT} **New Seller Submission — Pending Category Price**\n\n"
+            f"{em.USER} Seller: `{seller_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{flag} Country: {cname} ({cc})\n"
+            f"{em.CALENDAR} Year: **{year_label}**\n"
+            f"{em.MAIL} Email Added: **{'Yes' if has_email else 'No'}**\n\n"
+            f"Set category price in **Admin Panel ➔ Country Pricing** to activate this account."
+        )
+
+        await safe_edit(status_msg,
+            f"{em.SUCCESS} **Account Submitted!**\n\n"
+            f"{flag} `{phone}` ({cname})\n"
+            f"{em.CALENDAR} Account Year: **{year_label}**\n\n"
+            f"⏳ Category price for {flag} {cname} ({year_label}) is being configured by admins.\n"
+            f"Your account will automatically be listed once price setup is complete!",
+            reply_markup=back_kb("sell_account"),
+        )
+
+
+async def _handle_sell_withdrawal_details(message: Message, text: str):
+    user_id = message.from_user.id
+    state = sell_states.pop(user_id, None)
+    if not state:
+        return
+
+    method = state["method"]
+    amount = state["amount"]
+    details = text.strip()
+
+    req = await db.create_withdrawal_request(user_id, amount, method, details)
+    if not req:
+        await message.reply(f"{em.ERROR} Insufficient withdrawable balance.", reply_markup=back_kb("sell_account"))
+        return
+
+    await alert(bot,
+        f"{em.ALERT} **New External Withdrawal Request**\n\n"
+        f"{em.USER} Seller: `{user_id}`\n"
+        f"{em.MONEY} Amount: **{amount} credits**\n"
+        f"{em.NOTE} Method: **{method.upper()}**\n"
+        f"{em.LINK} Details: `{details}`"
+    )
+
+    await message.reply(
+        f"{em.SUCCESS} **Withdrawal Request Submitted!**\n\n"
+        f"{em.MONEY} Amount: **{amount} credits**\n"
+        f"{em.NOTE} Method: **{method.upper()}**\n"
+        f"{em.LINK} Details: `{details}`\n\n"
+        f"Admins will process your payment shortly.",
+        reply_markup=main_menu_kb(False),
+    )
+

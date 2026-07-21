@@ -38,6 +38,18 @@ def mask_phone(phone: str) -> str:
     return phone
 
 
+def mask_secret(secret: str) -> str:
+    """Mask a secret, keeping the first 2 and last 2 chars (e.g. 'aa****zz').
+
+    Short secrets (<= 4 chars) are fully masked so nothing meaningful leaks.
+    """
+    if not secret:
+        return ""
+    if len(secret) <= 4:
+        return "*" * len(secret)
+    return secret[:2] + "*" * (len(secret) - 4) + secret[-2:]
+
+
 COUNTRY_CODES = [
     ("93", "AF", "Afghanistan", "\U0001f1e6\U0001f1eb"),
     ("355", "AL", "Albania", "\U0001f1e6\U0001f1f1"),
@@ -150,6 +162,7 @@ COUNTRY_CODES = [
 ]
 
 _PREFIX_MAP = sorted(COUNTRY_CODES, key=lambda x: len(x[0]), reverse=True)
+_CODE_MAP = {code: (name, flag) for _, code, name, flag in COUNTRY_CODES}
 
 
 def detect_country(phone: str) -> tuple[str, str, str]:
@@ -162,17 +175,13 @@ def detect_country(phone: str) -> tuple[str, str, str]:
 
 
 def get_country_flag(country_code: str) -> str:
-    for _, code, _, flag in COUNTRY_CODES:
-        if code == country_code:
-            return flag
-    return "\U0001f3f3️"
+    entry = _CODE_MAP.get(country_code)
+    return entry[1] if entry else "\U0001f3f3️"
 
 
 def get_country_name(country_code: str) -> str:
-    for _, code, name, _ in COUNTRY_CODES:
-        if code == country_code:
-            return name
-    return "Unknown"
+    entry = _CODE_MAP.get(country_code)
+    return entry[0] if entry else "Unknown"
 
 
 # ── Account age estimation ──
@@ -210,15 +219,59 @@ def estimate_account_year(user_id: int) -> int | None:
     if user_id <= pts[0][0]:
         return int(pts[0][1])
     if user_id >= pts[-1][0]:
-        return int(pts[-1][1])
+        return round(pts[-1][1])
 
     for i in range(len(pts) - 1):
         id_lo, yr_lo = pts[i]
         id_hi, yr_hi = pts[i + 1]
         if id_lo <= user_id <= id_hi:
             frac = (user_id - id_lo) / (id_hi - id_lo)
-            return int(yr_lo + frac * (yr_hi - yr_lo))
+            return round(yr_lo + frac * (yr_hi - yr_lo))
     return None
+
+
+def extract_year_from_reg_month(reg_month) -> int | None:
+    """Extract 4-digit registration year from Telegram registration_month string or value (e.g. '05.2024' or '2024.05')."""
+    if not reg_month:
+        return None
+    try:
+        s = str(reg_month).strip()
+        import re
+        m = re.search(r'\b(20[1-3][0-9])\b', s)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def format_timestamp(ts: int) -> str:
+    """Format Unix timestamp into readable date-time string."""
+    if not ts:
+        return "Unknown"
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+
+
+async def get_active_sessions_info(client) -> tuple[int, str]:
+    """Invoke GetAuthorizations and return (session_count, formatted_session_info)."""
+    from pyrogram.raw.functions.account import GetAuthorizations
+
+    res = await client.invoke(GetAuthorizations())
+    authorizations = getattr(res, "authorizations", [])
+
+    session_info = "**ACTIVE SESSIONS**\n\n"
+    for session in authorizations:
+        app_name = getattr(session, "app_name", "Unknown")
+        current = getattr(session, "current", False)
+
+        session_info += (
+            f"<blockquote>App Name: {app_name}</blockquote>\n"
+            f"<blockquote>Current Session: {current}</blockquote>\n\n"
+        )
+    return len(authorizations), session_info
+
+
 
 
 def search_country(query: str) -> list[tuple[str, str, str]]:

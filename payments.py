@@ -2,7 +2,7 @@ import hmac
 import hashlib
 import time
 import logging
-import requests
+import aiohttp
 import razorpay
 from decimal import Decimal
 from config import (
@@ -49,23 +49,24 @@ def check_razorpay_payment(qr_id: str, expected_amount: int) -> str:
         return "error"
 
 
-def get_binance_deposit_address(coin: str = "USDT", network: str = "BSC") -> tuple[bool, dict]:
+async def get_binance_deposit_address(coin: str = "USDT", network: str = "BSC") -> tuple[bool, dict]:
     ts = int(time.time() * 1000)
     params = f"coin={coin}&network={network}&timestamp={ts}&recvWindow=60000"
     sig = hmac.new(BINANCE_API_SECRET.encode(), params.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     url = f"https://api.binance.com/sapi/v1/capital/deposit/address?{params}&signature={sig}"
     try:
-        r = requests.get(url, headers=headers, timeout=20)
-        j = r.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                j = await resp.json()
     except Exception as e:
         return False, {"error": str(e)}
     if isinstance(j, dict) and j.get("address"):
         return True, {"address": j["address"], "tag": j.get("tag", "")}
-    return False, {"error": j.get("msg", str(j))}
+    return False, {"error": j.get("msg", str(j)) if isinstance(j, dict) else str(j)}
 
 
-def verify_binance_deposit(tx_hash: str, asset: str = "USDT", min_amount: float = 0.0) -> tuple[bool, str]:
+async def verify_binance_deposit(tx_hash: str, asset: str = "USDT", min_amount: float = 0.0) -> tuple[bool, str]:
     ts = int(time.time() * 1000)
     params = {"timestamp": ts, "recvWindow": 60000}
     query = "&".join(f"{k}={v}" for k, v in params.items())
@@ -73,8 +74,9 @@ def verify_binance_deposit(tx_hash: str, asset: str = "USDT", min_amount: float 
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     url = f"https://api.binance.com/sapi/v1/capital/deposit/hisrec?{query}&signature={sig}"
     try:
-        r = requests.get(url, headers=headers, timeout=20)
-        j = r.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                j = await resp.json()
     except Exception as e:
         return False, f"Network error: {e}"
     if not isinstance(j, list):
@@ -92,3 +94,4 @@ def verify_binance_deposit(tx_hash: str, asset: str = "USDT", min_amount: float 
         return True, f"Confirmed: {received} {asset}"
 
     return False, "No matching deposit found. Check your TX hash."
+
