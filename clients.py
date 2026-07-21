@@ -1,9 +1,20 @@
 import asyncio
+import json
 import logging
+import re
+import secrets
+import string
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
+from pyrogram.raw import functions as raw_fn
+from pyrogram.raw import types as raw_types
+from pyrogram.errors import PeerFlood, PhoneNumberFlood
 
-from config import API_ID, API_HASH, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS
+from config import (
+    API_ID, API_HASH, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS,
+    NEW_LOGIN_EMAIL, INBOX_API_BASE, INBOX_API_KEY,
+)
 import database as db
 from utils import extract_otp, detect_country, estimate_account_year
 
@@ -100,6 +111,32 @@ async def _on_new_message(client: Client, message):
                 await _send_admin_alert(purchase_alert)
         await db.mark_assignment_otp_received(phone)
         log.info("[%s] OTP delivered, session stays active until timeout/release", phone)
+
+        # ── Seller self-login: OTP received means they reclaimed the account.
+        # Remove the listing immediately and blacklist the phone permanently so
+        # the seller cannot re-list the same number for sale again.
+        if req and req.get("no_sale"):
+            seller_id = req["user_id"]
+            log.info("[%s] Seller retrieved OTP — removing listing and blacklisting phone", phone)
+            await db.remove_session(phone)
+            await db.blacklist_seller_phone(phone, seller_id, reason="seller_retrieved_otp")
+            await _send_admin_alert(
+                f"⚠️ **Seller Retrieved Own Account**\n\n"
+                f"📱 Phone: `{phone}`\n"
+                f"👤 Seller ID: `{seller_id}`\n"
+                f"🚫 Account delisted and blacklisted from re-listing."
+            )
+            if bot_app:
+                try:
+                    await bot_app.send_message(
+                        seller_id,
+                        f"🚫 **Account Reclaimed — Listing Removed**\n\n"
+                        f"You received an OTP for `{phone}`, confirming you have regained access.\n\n"
+                        f"• The listing has been **permanently removed** from the store.\n"
+                        f"• This number is **blacklisted** and cannot be re-submitted for sale.",
+                    )
+                except Exception as e:
+                    log.error("[%s] Failed to notify seller of listing removal: %s", phone, e)
     else:
         if bot_app:
             try:
@@ -116,7 +153,7 @@ async def _on_new_message(client: Client, message):
                 log.error("[%s] Failed to forward msg to %d: %s", phone, user_id, e)
 
 
-def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1):
+def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False):
     if phone in active_requests and active_requests[phone].get("timer"):
         active_requests[phone]["timer"].cancel()
 
@@ -127,9 +164,10 @@ def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1):
         "timer": timer,
         "price": price,
         "otp_received": False,
+        "no_sale": no_sale,   # seller logging into their OWN listing — never mark sold
     }
     asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout))
-    log.info("[%s] Assigned to user %d (timeout=%ds, price=%d)", phone, user_id, timeout, price)
+    log.info("[%s] Assigned to user %d (timeout=%ds, price=%d, no_sale=%s)", phone, user_id, timeout, price, no_sale)
 
 
 def release_number(phone: str) -> dict | None:
@@ -157,23 +195,27 @@ async def _on_timeout(phone: str):
 
     await db.remove_active_assignment(phone)
 
-    if otp_received:
-        await db.mark_session_sold(phone, user_id)
+    if otp_received and not req.get("no_sale"):
+        await db.mark_session_sold(phone, user_id, price)
         log.info("[%s] Timeout — OTP was received, marked sold", phone)
+    elif otp_received and req.get("no_sale"):
+        log.info("[%s] Timeout — seller self-login, NOT marked sold", phone)
     else:
         if price > 0:
             await db.add_credits(user_id, price)
-        log.info("[%s] Timeout — no OTP, refunded %d credits to user %d", phone, price, user_id)
-        if bot_app:
-            try:
-                await bot_app.send_message(
-                    user_id,
-                    f"⏱ **Session expired** for `{phone}`\n\n"
-                    f"No OTP was received.\n"
-                    f"💰 **{price} credits** refunded.",
-                )
-            except Exception as e:
-                log.error("[%s] Failed to notify timeout: %s", phone, e)
+            log.info("[%s] Timeout — no OTP, refunded %d credits to user %d", phone, price, user_id)
+            if bot_app:
+                try:
+                    await bot_app.send_message(
+                        user_id,
+                        f"⏱ **Session expired** for `{phone}`\n\n"
+                        f"No OTP was received.\n"
+                        f"💰 **{price} credits** refunded.",
+                    )
+                except Exception as e:
+                    log.error("[%s] Failed to notify timeout: %s", phone, e)
+        else:
+            log.info("[%s] Timeout — no OTP, free assignment (no refund)", phone)
 
     await stop_session(phone)
     log.info("[%s] Timeout cleanup complete", phone)
@@ -309,6 +351,277 @@ async def check_password(phone: str, password: str) -> tuple[bool, str]:
     except Exception as e:
         log.warning("[%s] Password check failed: %s", phone, e)
         return False, str(e)
+
+
+def generate_password(length: int = 8) -> str:
+    """Generate a random alphanumeric password (letters + digits)."""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+async def _fetch_email_otp() -> str | None:
+    """Poll the inbox API for the latest Telegram verification code sent to NEW_LOGIN_EMAIL."""
+    url = f"{INBOX_API_BASE}?to={NEW_LOGIN_EMAIL}&from=noreply@telegram.org&limit=1"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers={"x-api-key": INBOX_API_KEY}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json(content_type=None)
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("emails", data.get("messages", data.get("data", [])))
+        else:
+            items = []
+        if items:
+            msg = items[0]
+            text_content = " ".join(
+                str(msg.get(k, "")) for k in ("subject", "body", "text", "html")
+            )
+            match = re.search(r"\b(\d{5,6})\b", text_content)
+            if match:
+                return match.group(1)
+    except Exception as e:
+        log.warning("Failed to poll inbox API: %s", e)
+    return None
+
+
+async def _change_password(client: Client, phone: str, old_password: str, new_password: str) -> bool:
+    """Rotate the account's 2FA password. Returns True on verified success."""
+    try:
+        await client.change_cloud_password(current_password=old_password, new_password=new_password)
+    except Exception as e:
+        # change_cloud_password can raise even when the change went through; the
+        # check_password below is the source of truth.
+        log.warning("[%s] change_cloud_password raised (verifying anyway): %s", phone, e)
+    try:
+        await client.check_password(new_password)
+        log.info("[%s] 2FA password rotated and verified", phone)
+        return True
+    except Exception as e:
+        log.error("[%s] Password rotation failed verification: %s", phone, e)
+        return False
+
+
+async def _change_login_email(client: Client, phone: str) -> bool:
+    """Switch the account's login email to NEW_LOGIN_EMAIL.
+
+    Only meaningful when a login email is ALREADY configured; the caller must check.
+    Returns True on verified success.
+    """
+    purpose = raw_types.EmailVerifyPurposeLoginChange()
+    try:
+        await client.invoke(raw_fn.account.SendVerifyEmailCode(purpose=purpose, email=NEW_LOGIN_EMAIL))
+    except Exception as e:
+        log.error("[%s] SendVerifyEmailCode failed: %s", phone, e)
+        return False
+
+    otp_code = None
+    start = 0
+    while start < 20:  # ~60s at 3s intervals
+        otp_code = await _fetch_email_otp()
+        if otp_code:
+            break
+        await asyncio.sleep(3)
+        start += 1
+
+    if not otp_code:
+        log.error("[%s] Timed out waiting for email OTP to %s", phone, NEW_LOGIN_EMAIL)
+        return False
+
+    try:
+        await client.invoke(raw_fn.account.VerifyEmail(
+            purpose=purpose,
+            verification=raw_types.EmailVerificationCode(code=otp_code),
+        ))
+    except Exception as e:
+        log.error("[%s] VerifyEmail failed: %s", phone, e)
+        return False
+
+    try:
+        pwd_info = await client.invoke(raw_fn.account.GetPassword())
+        new_pattern = getattr(pwd_info, "login_email_pattern", None)
+        log.info("[%s] Login email switched — new pattern: %s", phone, new_pattern)
+        return True
+    except Exception as e:
+        log.warning("[%s] Could not re-check login email after verify: %s", phone, e)
+        return True  # verify succeeded; re-check is best-effort
+
+
+async def secure_purchased_account(phone: str, session_string: str, old_password: str = "") -> dict:
+    """Secure a just-purchased seller account: rotate 2FA password and (if the
+    account already has a login email) switch the login email to ours.
+
+    Connects from the stored session string. Returns a dict:
+        {
+          "ok": bool,                 # overall — True if password rotation succeeded
+          "new_password": str | None, # the stored new password (None if rotation failed)
+          "email_changed": bool,      # login email switched to NEW_LOGIN_EMAIL
+          "email_present": bool,      # account had a login email to begin with
+          "error": str,               # first error encountered, if any
+        }
+    """
+    result = {"ok": False, "new_password": None, "email_changed": False, "email_present": False, "error": ""}
+
+    client = Client(
+        name=f"secure_{phone.replace('+', '')}",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=session_string,
+        in_memory=True,
+    )
+    try:
+        await client.start()
+    except Exception as e:
+        result["error"] = f"connect failed: {e}"
+        log.error("[%s] secure_purchased_account connect failed: %s", phone, e)
+        return result
+
+    try:
+        # Detect whether a login email already exists (we only switch, never add).
+        try:
+            pwd_info = await client.invoke(raw_fn.account.GetPassword())
+            result["email_present"] = getattr(pwd_info, "login_email_pattern", None) is not None
+        except Exception as e:
+            log.warning("[%s] GetPassword failed during secure: %s", phone, e)
+
+        # 1. Rotate 2FA password.
+        new_password = generate_password(8)
+        if await _change_password(client, phone, old_password, new_password):
+            result["ok"] = True
+            result["new_password"] = new_password
+        else:
+            result["error"] = result["error"] or "password rotation failed"
+
+        # 2. Switch login email only if one already exists.
+        if result["email_present"]:
+            if await _change_login_email(client, phone):
+                result["email_changed"] = True
+            else:
+                result["error"] = result["error"] or "email change failed"
+        else:
+            log.info("[%s] No login email present — skipping email switch", phone)
+    finally:
+        try:
+            await client.stop()
+        except Exception:
+            pass
+
+    return result
+
+
+async def _pick_probe_candidates(exclude_phone: str, limit: int = 3) -> list[dict]:
+    """Return up to `limit` active sessions that are NOT the account under test and
+    NOT currently assigned to a buyer. These act as 'observer' accounts (B/C/D) that
+    account A will message so they can read A's registration_month.
+    """
+    sessions = await db.get_active_sessions()
+    candidates = [
+        s for s in sessions
+        if s.get("phone_number") != exclude_phone
+        and s.get("phone_number") not in active_requests
+        and s.get("session_string")
+    ]
+    return candidates[:limit]
+
+
+async def _read_reg_month_from_observer(observer_session: str, observer_phone: str, target_user_id: int) -> str | None:
+    """Start an observer account (B) from its session string and read the
+    registration_month of `target_user_id` (A) via GetFullUser + PeerSettings.
+
+    A must have already messaged B for Telegram to populate registration_month.
+    Reuses an already-running client if the observer is in active_clients.
+    Returns the raw "MM.YYYY" string, or None.
+    """
+    from pyrogram.raw.functions.users import GetFullUser
+
+    running = active_clients.get(observer_phone)
+    client = running
+    started_here = False
+    if client is None:
+        client = Client(
+            name=f"probe_obs_{observer_phone.replace('+', '')}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=observer_session,
+            in_memory=True,
+        )
+        try:
+            await client.start()
+            started_here = True
+        except Exception as e:
+            log.warning("[probe] observer %s failed to start: %s", observer_phone, e)
+            return None
+
+    try:
+        peer = await client.resolve_peer(target_user_id)
+        full_user = await client.invoke(GetFullUser(id=peer))
+        user_full_info = getattr(full_user, "full_user", full_user)
+        settings = getattr(user_full_info, "settings", getattr(full_user, "settings", None))
+        reg_month = getattr(settings, "registration_month", None) if settings else None
+        # Remove the probe conversation from the observer's chat list entirely.
+        try:
+            await client.delete_chat_history(target_user_id, revoke=True)
+        except Exception as e:
+            log.info("[probe] observer %s failed to clear chat history: %s", observer_phone, e)
+        return reg_month
+    except Exception as e:
+        log.warning("[probe] observer %s GetFullUser(%s) failed: %s", observer_phone, target_user_id, e)
+        return None
+    finally:
+        if started_here:
+            try:
+                await client.stop()
+            except Exception:
+                pass
+
+
+async def probe_registration_month(client: Client, target_user_id: int, target_phone: str) -> tuple[str | None, bool]:
+    """Cross-account registration_month probe with built-in PEER_FLOOD detection.
+
+    Using account A's own `client`, iterate over a few active observer accounts:
+      1. Import the observer's phone as a contact on A and send a probe message.
+         - PEER_FLOOD  -> A is spam-limited: abort, return (None, True).
+         - other error -> skip to next observer.
+      2. On a successful send, have the observer read A's registration_month.
+         - present -> return (reg_month, False)
+         - absent  -> next observer.
+
+    Returns (reg_month_or_None, is_peer_flood).
+    Falls back to (None, False) if no observer yields a value and A is not flooded.
+    """
+    candidates = await _pick_probe_candidates(target_phone)
+    if not candidates:
+        log.info("[probe] no observer accounts available for %s — skipping cross-account probe", target_phone)
+        return None, False
+
+    for obs in candidates:
+        obs_phone = obs["phone_number"]
+        obs_session = obs["session_string"]
+        try:
+            # send_message on a phone-number string makes pyrogram call
+            # contacts.ResolvePhone under the hood (no contact added to A), then
+            # sends. This send IS the PEER_FLOOD test.
+            await client.send_message(obs_phone, ".")
+        except PeerFlood:
+            log.warning("[probe] %s is PEER_FLOOD limited (blocked messaging %s)", target_phone, obs_phone)
+            return None, True
+        except (PhoneNumberFlood,) as e:
+            log.warning("[probe] %s hit phone flood limit: %s", target_phone, e)
+            return None, True
+        except Exception as e:
+            log.info("[probe] %s: send to observer %s failed (%s), trying next", target_phone, obs_phone, e)
+            continue
+
+        # Send succeeded — observer can now read A's registration_month and then
+        # clear the probe chat for BOTH sides from its own account (revoke=True).
+        reg_month = await _read_reg_month_from_observer(obs_session, obs_phone, target_user_id)
+
+        if reg_month:
+            log.info("[probe] %s: registration_month=%s via observer %s", target_phone, reg_month, obs_phone)
+            return reg_month, False
+        log.info("[probe] %s: observer %s returned no registration_month, trying next", target_phone, obs_phone)
+
+    return None, False
 
 
 async def disconnect_all():

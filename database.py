@@ -1,6 +1,7 @@
 import motor.motor_asyncio
 from datetime import datetime, timezone, timedelta
-from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR
+from pymongo.errors import DuplicateKeyError
+from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client.otpbot
@@ -19,6 +20,7 @@ async def create_user(telegram_id: int, username: str, first_name: str, role: st
         "first_name": first_name or "",
         "role": role,
         "credits": 0,
+        "balance": 0,
         "is_active": True,
         "referred_by": referred_by,
         "referral_earned": 0,
@@ -89,7 +91,7 @@ async def consume_verify_token(token: str) -> int | None:
     return None
 
 
-# ── Credits ──
+# ── Credits & Balance ──
 
 async def get_credits(telegram_id: int) -> int:
     user = await get_user(telegram_id)
@@ -105,18 +107,32 @@ async def add_credits(telegram_id: int, amount: int):
     )
 
 
-async def deduct_credit(telegram_id: int) -> bool:
-    result = await db.users.update_one(
-        {"telegram_id": telegram_id, "credits": {"$gte": 1}},
-        {"$inc": {"credits": -1}},
-    )
-    return result.modified_count > 0
-
-
 async def deduct_credits(telegram_id: int, amount: int) -> bool:
     result = await db.users.update_one(
         {"telegram_id": telegram_id, "credits": {"$gte": amount}},
         {"$inc": {"credits": -amount}},
+    )
+    return result.modified_count > 0
+
+
+async def get_balance(telegram_id: int) -> int:
+    user = await get_user(telegram_id)
+    if not user:
+        return 0
+    return user.get("balance", 0)
+
+
+async def add_balance(telegram_id: int, amount: int):
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$inc": {"balance": amount}},
+    )
+
+
+async def deduct_balance(telegram_id: int, amount: int) -> bool:
+    result = await db.users.update_one(
+        {"telegram_id": telegram_id, "balance": {"$gte": amount}},
+        {"$inc": {"balance": -amount}},
     )
     return result.modified_count > 0
 
@@ -183,10 +199,6 @@ async def set_offer(telegram_id: int, credits: int, duration_hours: float):
     return offer
 
 
-# ── Country Pricing (Removed) ──
-
-
-
 # ── Sessions ──
 
 async def save_session(phone_number: str, session_string: str, added_by: int,
@@ -247,9 +259,16 @@ async def remove_session(phone_number: str):
         session.pop("session_string", None)  # don't retain the credential
         await db.removed_sessions.insert_one(session)
     await db.sessions.delete_one({"phone_number": phone_number})
+    # Mark any matching sell listing as removed (no payout deduction — credits
+    # are paid directly at sale time and are not reversed on later removal).
+    await db.sell_listings.update_one(
+        {"phone_number": phone_number, "status": {"$in": ["active", "pending_price"]}},
+        {"$set": {"status": "removed", "last_error": "session_removed"},
+         "$unset": {"active_slot": ""}},
+    )
 
 
-async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0):
+async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> dict | None:
     await db.sessions.update_one(
         {"phone_number": phone_number},
         {"$set": {
@@ -259,6 +278,42 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0):
             "sold_price": price,
         }},
     )
+    listing = await db.sell_listings.find_one({"phone_number": phone_number})
+    if listing and listing.get("status") in ("active", "pending_price"):
+        # Atomically flip to sold AND claim the payout in one guarded write, so a
+        # concurrent/duplicate sale can never credit the seller twice.
+        payout = listing.get("payout_credits", 0)
+        claimed = await db.sell_listings.find_one_and_update(
+            {"_id": listing["_id"], "payout_credited": {"$ne": True}},
+            {"$set": {
+                "status": "sold",
+                "buyer_id": sold_to,
+                "sale_price": price,
+                "sold_at": datetime.now(timezone.utc),
+                "payout_credited": True,
+            }},
+            return_document=True,
+        )
+        if claimed and listing.get("seller_id") and payout > 0:
+            # Seller is paid ONLY now — on a real buyer purchase.
+            seller_id = listing["seller_id"]
+            await add_seller_earning(seller_id, payout)
+            # Notify the seller that their account was just purchased.
+            import clients as _clients
+            from utils import mask_phone as _mask
+            if _clients.bot_app:
+                try:
+                    await _clients.bot_app.send_message(
+                        seller_id,
+                        f"✅ **Account Sold!**\n\n"
+                        f"📱 `{_mask(phone_number)}` was just purchased by a buyer.\n"
+                        f"💰 **+{payout} credits** have been added to your withdrawable balance.",
+                    )
+                except Exception:
+                    pass
+        return {"seller_id": listing["seller_id"], "payout": payout, "phone_number": phone_number}
+    return None
+
 
 
 async def get_sold_sessions():
@@ -554,6 +609,27 @@ async def ensure_indexes():
     await db.auth_failures.create_index("created_at")
     await db.removed_sessions.create_index("removed_at")
     await db.removed_sessions.create_index("sold_at")
+    # Prevent duplicate seller submissions of the same phone: at most one
+    # non-removed listing per phone_number. We key the unique index on the
+    # `active_slot` field, which holds the phone number while a listing is
+    # non-removed and is unset once it becomes "removed". This lets a
+    # rejected/removed account be legitimately re-listed later.
+    #
+    # NB: the partial filter uses `$exists` (not `$in` on status) because
+    # MongoDB only permits equality/$exists/range/$type in partial filters.
+    await db.sell_listings.create_index(
+        "active_slot",
+        unique=True,
+        partialFilterExpression={"active_slot": {"$exists": True}},
+        name="uniq_active_listing_phone",
+    )
+    # Permanent blacklist for phones the seller retrieved back via OTP.
+    # phone_number is unique — one record per phone is enough.
+    await db.seller_phone_blacklist.create_index(
+        "phone_number",
+        unique=True,
+        name="uniq_seller_phone_blacklist",
+    )
 
 
 async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
@@ -744,3 +820,284 @@ async def top_referrer_24h():
         name = (user.get("username") or user.get("first_name") or str(doc["_id"])) if user else str(doc["_id"])
         return {"name": name, "user_id": doc["_id"], "count": doc["count"]}
     return None
+
+
+# ── Seller Marketplace ──
+
+# A phone is considered "taken" while it holds a listing in any of these states.
+# "removed" is excluded so a rejected/removed account can be legitimately re-listed.
+ACTIVE_LISTING_STATUSES = ("pending_price", "active", "sold")
+
+
+async def create_sell_listing(
+    phone_number: str,
+    seller_id: int,
+    session_string: str,
+    password: str = "",
+    country_code: str = "XX",
+    account_id: int = None,
+    account_year: int = None,
+    email_added: bool = False,
+) -> dict:
+    """Create a new seller listing.
+
+    status values:
+      pending_price — category price not set; admin must add it before the account goes live
+      active        — listed for sale in the main pool
+      sold          — account was purchased and OTP delivered
+      removed       — removed by admin
+
+    Returns the new listing doc, or None if a non-removed listing for this phone
+    already exists (prevents duplicate submissions / multiplied payouts).
+    """
+    doc = {
+        "phone_number": phone_number,
+        "seller_id": seller_id,
+        "session_string": session_string,
+        "password": password,
+        "country_code": country_code,
+        "account_id": account_id,
+        "account_year": account_year,
+        "email_added": email_added,
+        "status": "pending_price",  # will be updated to "active" once price is confirmed
+        "payout_credits": 0,        # credits earned by seller when sold
+        # Sentinel for the unique index: present (== phone) while non-removed,
+        # unset when the listing is removed so the phone can be re-listed.
+        "active_slot": phone_number,
+        "created_at": datetime.now(timezone.utc),
+    }
+    # Fast-path check for a friendly result; the unique index below is the
+    # real guard against concurrent submissions racing past this check.
+    if await get_active_listing_by_phone(phone_number):
+        return None
+    try:
+        result = await db.sell_listings.insert_one(doc)
+    except DuplicateKeyError:
+        # Lost the race against a concurrent submission of the same phone.
+        return None
+    doc["_id"] = result.inserted_id
+    return doc
+
+
+async def get_active_listing_by_phone(phone_number: str) -> dict | None:
+    """Return a non-removed listing for this phone if one exists, else None."""
+    return await db.sell_listings.find_one({
+        "phone_number": phone_number,
+        "status": {"$in": list(ACTIVE_LISTING_STATUSES)},
+    })
+
+
+async def activate_sell_listing(listing_id, price: int) -> dict | None:
+    """Mark a listing as active and record the payout it will earn WHEN SOLD.
+
+    Payout is NOT credited here — the seller is paid only when a buyer actually
+    purchases the number (see mark_session_sold). payout_credited tracks that.
+    """
+    from bson import ObjectId
+    payout = int(price * SELLER_PAYOUT_PERCENT / 100)
+    doc = await db.sell_listings.find_one_and_update(
+        {"_id": ObjectId(str(listing_id))},
+        {"$set": {
+            "status": "active",
+            "price": price,
+            "payout_credits": payout,
+            "payout_credited": False,
+            "activated_at": datetime.now(timezone.utc),
+        }},
+        return_document=True,
+    )
+    return doc
+
+
+async def mark_sell_listing_sold(listing_id, buyer_id: int, sale_price: int) -> dict | None:
+    """Mark a listing as sold and record payout info. Returns updated doc."""
+    from bson import ObjectId
+    payout = int(sale_price * SELLER_PAYOUT_PERCENT / 100)
+    doc = await db.sell_listings.find_one_and_update(
+        {"_id": ObjectId(str(listing_id))},
+        {"$set": {
+            "status": "sold",
+            "buyer_id": buyer_id,
+            "sale_price": sale_price,
+            "payout_credits": payout,
+            "sold_at": datetime.now(timezone.utc),
+        }},
+        return_document=True,
+    )
+    return doc
+
+
+async def get_sell_listing_by_phone(phone_number: str) -> dict | None:
+    """Look up a sell listing by phone number (any status)."""
+    return await db.sell_listings.find_one({"phone_number": phone_number})
+
+
+async def get_pending_price_listings() -> list:
+    """Return all listings awaiting a category price from admin."""
+    return await db.sell_listings.find({"status": "pending_price"}).sort("created_at", 1).to_list(None)
+
+
+async def get_user_sell_listings(seller_id: int) -> list:
+    """Return all listings submitted by this seller, newest first."""
+    return await db.sell_listings.find({"seller_id": seller_id}).sort("created_at", -1).to_list(None)
+
+
+async def get_sell_listing_stats() -> dict:
+    """Aggregate counts by status for admin stats."""
+    result = {}
+    async for doc in db.sell_listings.aggregate([
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}}
+    ]):
+        result[doc["_id"] or "unknown"] = doc["n"]
+    return result
+
+
+async def check_and_activate_pending_listings(country_code: str, year: int | None, email_added: bool | None) -> list:
+    """Find pending_price listings matching category and activate them if category price is now set."""
+    price = await get_category_price(country_code, year, email_added)
+    if price is None:
+        return []
+
+    query = {"status": "pending_price", "country_code": country_code}
+    if year is not None:
+        query["account_year"] = year
+    if email_added is not None:
+        query["email_added"] = bool(email_added)
+
+    activated = []
+    async for listing in db.sell_listings.find(query):
+        phone = listing["phone_number"]
+        seller_id = listing["seller_id"]
+        session_string = listing["session_string"]
+        pwd = listing.get("password", "")
+        acc_id = listing.get("account_id")
+
+        updated_doc = await activate_sell_listing(listing["_id"], price)
+        await save_session(
+            phone, session_string, seller_id,
+            password=pwd, country_code=country_code,
+            account_id=acc_id, account_year=year, email_added=bool(email_added)
+        )
+        if updated_doc:
+            activated.append(updated_doc)
+    return activated
+
+
+
+# ── Seller Earnings ──
+
+async def add_seller_earning(seller_id: int, amount: int):
+    """Credit seller earnings into their withdrawable seller balance."""
+    await db.users.update_one(
+        {"telegram_id": seller_id},
+        {"$inc": {"seller_earned_total": amount, "balance": amount}},
+    )
+
+
+async def get_seller_stats(seller_id: int) -> dict:
+    """Return seller earning totals, withdrawable balance, and listing counts."""
+    user = await get_user(seller_id)
+    earned_total = (user or {}).get("seller_earned_total", 0)
+    balance = (user or {}).get("balance", 0)
+
+    listings = await get_user_sell_listings(seller_id)
+    counts = {"active": 0, "pending_price": 0, "sold": 0, "removed": 0}
+    for lst in listings:
+        st = lst.get("status", "unknown")
+        counts[st] = counts.get(st, 0) + 1
+
+    return {
+        "earned_total": earned_total,
+        "balance": balance,
+        "listings": counts,
+    }
+
+
+# ── Seller Withdrawal Requests ──
+
+async def create_withdrawal_request(seller_id: int, amount: int, method: str, details: str) -> dict:
+    """Create an external payout request and deduct from the seller's withdrawable balance."""
+    doc = {
+        "seller_id": seller_id,
+        "amount": amount,
+        "method": method,           # e.g. "upi", "crypto_usdt"
+        "details": details,         # e.g. UPI ID or wallet address
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc),
+    }
+    # Deduct from balance atomically — fail if not enough balance.
+    result = await db.users.update_one(
+        {"telegram_id": seller_id, "balance": {"$gte": amount}},
+        {"$inc": {"balance": -amount}},
+    )
+    if result.modified_count == 0:
+        return {}   # not enough balance
+    result2 = await db.withdrawal_requests.insert_one(doc)
+    doc["_id"] = result2.inserted_id
+    return doc
+
+
+async def get_pending_withdrawals() -> list:
+    return await db.withdrawal_requests.find({"status": "pending"}).sort("created_at", 1).to_list(None)
+
+
+async def mark_withdrawal_done(withdrawal_id, admin_note: str = "") -> bool:
+    from bson import ObjectId
+    result = await db.withdrawal_requests.update_one(
+        {"_id": ObjectId(str(withdrawal_id)), "status": "pending"},
+        {"$set": {
+            "status": "done",
+            "admin_note": admin_note,
+            "processed_at": datetime.now(timezone.utc),
+        }},
+    )
+    return result.modified_count > 0
+
+
+async def mark_withdrawal_rejected(withdrawal_id, reason: str = "") -> dict | None:
+    """Reject a withdrawal and refund the amount back to the seller's withdrawable balance."""
+    from bson import ObjectId
+    doc = await db.withdrawal_requests.find_one_and_update(
+        {"_id": ObjectId(str(withdrawal_id)), "status": "pending"},
+        {"$set": {
+            "status": "rejected",
+            "reject_reason": reason,
+            "processed_at": datetime.now(timezone.utc),
+        }},
+        return_document=True,
+    )
+    if doc:
+        # Refund back to the seller's withdrawable balance.
+        await db.users.update_one(
+            {"telegram_id": doc["seller_id"]},
+            {"$inc": {"balance": doc["amount"]}},
+        )
+    return doc
+
+
+# ── Seller Phone Blacklist ──
+
+async def blacklist_seller_phone(phone_number: str, seller_id: int, reason: str = "seller_retrieved_otp") -> bool:
+    """Permanently blacklist a phone so the seller can never re-list it for sale.
+
+    Called when a seller receives an OTP on their own listed account, proving they
+    reclaimed access. The listing is also removed from the store at this point.
+    Returns True if the phone was newly blacklisted, False if it was already there.
+    """
+    try:
+        await db.seller_phone_blacklist.insert_one({
+            "phone_number": phone_number,
+            "seller_id": seller_id,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc),
+        })
+        return True
+    except DuplicateKeyError:
+        return False  # already blacklisted
+
+
+async def is_seller_phone_blacklisted(phone_number: str) -> bool:
+    """Return True if this phone has been blacklisted from seller re-listing."""
+    doc = await db.seller_phone_blacklist.find_one({"phone_number": phone_number})
+    return doc is not None
+

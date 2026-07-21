@@ -37,6 +37,19 @@ VERIFY_PORT = int(os.getenv("VERIFY_PORT", "8888"))
 REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "5"))
 REFERRAL_VERIFY_BONUS = int(os.getenv("REFERRAL_VERIFY_BONUS", "1"))
 
+# ── Purchased-account securing (seller submissions) ──
+# When the store "buys" a seller's account we rotate its 2FA password and, if the
+# account already has a login email, switch it to our own so the seller can't
+# recover the account. The email OTP is read from our inbox API.
+NEW_LOGIN_EMAIL = os.getenv("NEW_LOGIN_EMAIL", "dev@nubcoders.com")
+INBOX_API_BASE = os.getenv("INBOX_API_BASE", "https.nubcoders.com/api/emails/inbox-api")
+INBOX_API_KEY = os.getenv("INBOX_API_KEY", "nm_live_738ed6dc1adc36a54768e29a77869c5d8419c9a79ea0ec95ec9446283688b1e3")
+
+# ── Seller Marketplace ──
+# Percentage of the sale price credited to the seller (rest goes to admin/platform).
+# E.g. 80 means seller keeps 80 credits for every 100-credit sale.
+SELLER_PAYOUT_PERCENT = int(os.getenv("SELLER_PAYOUT_PERCENT", "80"))
+
 # ── Random time-limited discount offers ──
 # A random flat credit discount (biased toward the minimum) is granted to a
 # user when they /start, valid for a random window, then locked out for a

@@ -38,10 +38,6 @@ def _load_registry() -> Dict[str, List[int]]:
     return registry
 
 
-def available_emojis() -> List[str]:
-    return sorted(_load_registry().keys())
-
-
 def document_ids_for(emoji: str) -> List[int]:
     return list(_load_registry().get(emoji, []))
 
