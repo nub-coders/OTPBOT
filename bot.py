@@ -264,11 +264,11 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(f"{em.PHONE} Buy Account", callback_data="get_number", style=S.PRIMARY),
-            InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.PRIMARY),
+            InlineKeyboardButton(f"{em.DOLLAR} Sell Account", callback_data="sell_account", style=S.SUCCESS),
         ],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
         [
-            InlineKeyboardButton(f"{em.DOLLAR} Sell Account", callback_data="sell_account", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.GIFT} Refer & Earn", callback_data="referral", style=S.PRIMARY),
         ],
         [
