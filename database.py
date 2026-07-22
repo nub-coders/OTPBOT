@@ -48,10 +48,6 @@ async def is_admin(telegram_id: int) -> bool:
     return user is not None and user.get("role") == "admin"
 
 
-async def admin_count() -> int:
-    return await db.users.count_documents({"role": "admin"})
-
-
 async def get_all_users():
     return await db.users.find().to_list(None)
 
@@ -122,19 +118,70 @@ async def get_balance(telegram_id: int) -> int:
     return user.get("balance", 0)
 
 
-async def add_balance(telegram_id: int, amount: int):
-    await db.users.update_one(
-        {"telegram_id": telegram_id},
-        {"$inc": {"balance": amount}},
-    )
+async def get_total_funds(telegram_id: int) -> tuple[int, int, int]:
+    """Return (credits, balance, total_available) for a user."""
+    user = await get_user(telegram_id)
+    if not user:
+        return 0, 0, 0
+    credits = user.get("credits", 0)
+    balance = user.get("balance", 0)
+    return credits, balance, credits + balance
 
 
-async def deduct_balance(telegram_id: int, amount: int) -> bool:
-    result = await db.users.update_one(
-        {"telegram_id": telegram_id, "balance": {"$gte": amount}},
-        {"$inc": {"balance": -amount}},
-    )
-    return result.modified_count > 0
+async def deduct_funds_for_purchase(telegram_id: int, amount: int) -> tuple[bool, int, int]:
+    """Deduct `amount` for purchasing an account.
+    First deducts from non-withdrawable `credits`. If credits are insufficient,
+    deducts the remainder from withdrawable `balance`.
+    Returns (success, credits_deducted, balance_deducted).
+    """
+    user = await get_user(telegram_id)
+    if not user:
+        return False, 0, 0
+
+    credits = user.get("credits", 0)
+    balance = user.get("balance", 0)
+
+    if (credits + balance) < amount:
+        return False, 0, 0
+
+    credits_deducted = min(credits, amount)
+    balance_deducted = amount - credits_deducted
+
+    inc = {}
+    if credits_deducted > 0:
+        inc["credits"] = -credits_deducted
+    if balance_deducted > 0:
+        inc["balance"] = -balance_deducted
+
+    if inc:
+        query = {"telegram_id": telegram_id}
+        if credits_deducted > 0:
+            query["credits"] = {"$gte": credits_deducted}
+        if balance_deducted > 0:
+            query["balance"] = {"$gte": balance_deducted}
+
+        res = await db.users.update_one(query, {"$inc": inc})
+        if res.modified_count == 0:
+            return False, 0, 0
+
+    return True, credits_deducted, balance_deducted
+
+
+async def restore_purchase_funds(telegram_id: int, credits_amount: int = 0, balance_amount: int = 0):
+    """Restore credits and balance when a purchase fails or times out without OTP."""
+    inc = {}
+    if credits_amount > 0:
+        inc["credits"] = credits_amount
+    if balance_amount > 0:
+        inc["balance"] = balance_amount
+    if inc:
+        await db.users.update_one(
+            {"telegram_id": telegram_id},
+            {"$inc": inc},
+        )
+
+
+
 
 
 # ── Discount Offers ──
@@ -145,7 +192,7 @@ async def get_active_offer(telegram_id: int) -> dict | None:
     if not user:
         return None
     offer = user.get("offer")
-    if not offer:
+    if not offer or offer.get("used"):
         return None
     expires_at = offer.get("expires_at")
     if not expires_at:
@@ -156,6 +203,49 @@ async def get_active_offer(telegram_id: int) -> dict | None:
     if expires_at <= datetime.now(timezone.utc):
         return None
     return offer
+
+
+async def consume_offer(telegram_id: int):
+    """Mark the user's active discount offer as used after a purchase."""
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"offer.used": True}},
+    )
+
+
+async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
+    """Restore a used discount offer if a purchase attempt failed or timed out without OTP.
+
+    If the offer expired (or has less than delay_hours + grace_minutes left), extend
+    expires_at to cover delay_hours + grace_minutes so the user does not lose their
+    discount while waiting for a pending refund or session timeout.
+    Returns True if an offer was restored, False otherwise.
+    """
+    user = await get_user(telegram_id)
+    if not user or not user.get("offer"):
+        return False
+
+    offer = user["offer"]
+    was_used = offer.get("used", False)
+    now = datetime.now(timezone.utc)
+    expires_at = offer.get("expires_at")
+
+    update_doc = {"$unset": {"offer.used": ""}}
+    needed_seconds = (delay_hours * 3600) + (grace_minutes * 60)
+
+    if expires_at:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now or (expires_at - now).total_seconds() < needed_seconds:
+            update_doc["$set"] = {"offer.expires_at": now + timedelta(seconds=needed_seconds)}
+
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        update_doc,
+    )
+    return was_used
+
+
 
 
 async def can_grant_offer(telegram_id: int) -> bool:
@@ -231,10 +321,6 @@ async def save_session(phone_number: str, session_string: str, added_by: int,
 
 async def get_session(phone_number: str):
     return await db.sessions.find_one({"phone_number": phone_number})
-
-
-async def get_all_sessions():
-    return await db.sessions.find().to_list(None)
 
 
 async def get_active_sessions():
@@ -316,17 +402,6 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> 
 
 
 
-async def get_sold_sessions():
-    return await db.sessions.find({"status": "sold"}).sort("sold_at", -1).to_list(None)
-
-
-async def set_session_password(phone_number: str, password: str):
-    await db.sessions.update_one(
-        {"phone_number": phone_number},
-        {"$set": {"password": password}},
-    )
-
-
 async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None):
     update_doc = {"account_id": account_id, "account_year": account_year}
     if email_added is not None:
@@ -380,11 +455,6 @@ async def save_otp(phone_number: str, code: str, message: str, sender: str, requ
     await db.otps.insert_one(doc)
     return doc
 
-
-async def get_user_otps(telegram_id: int, limit: int = 10):
-    return await db.otps.find(
-        {"requested_by": telegram_id}
-    ).sort("created_at", -1).limit(limit).to_list(None)
 
 
 # ── Active Assignments ──
@@ -447,19 +517,6 @@ async def get_pending_payments():
     return await db.pending_payments.find({"status": "pending"}).to_list(None)
 
 
-async def get_pending_payment(qr_id: str):
-    return await db.pending_payments.find_one({"qr_id": qr_id})
-
-
-async def mark_pending_payment_done(qr_id: str) -> bool:
-    """Atomically mark a pending payment as done. Returns True only if this call was the one that flipped it."""
-    result = await db.pending_payments.find_one_and_update(
-        {"qr_id": qr_id, "status": "pending"},
-        {"$set": {"status": "done", "paid_at": datetime.now(timezone.utc)}},
-    )
-    return result is not None
-
-
 async def mark_pending_payment_expired(qr_id: str):
     await db.pending_payments.update_one(
         {"qr_id": qr_id},
@@ -469,21 +526,7 @@ async def mark_pending_payment_expired(qr_id: str):
 
 # ── Pending Refunds ──
 
-REFUND_DELAY_HOURS = 2
-
-
-async def save_pending_refund(user_id: int, phone_number: str, amount: int):
-    refund_at = datetime.now(timezone.utc) + timedelta(hours=REFUND_DELAY_HOURS)
-    doc = {
-        "user_id": user_id,
-        "phone_number": phone_number,
-        "amount": amount,
-        "created_at": datetime.now(timezone.utc),
-        "refund_at": refund_at,
-        "status": "pending",
-    }
-    await db.pending_refunds.insert_one(doc)
-    return doc
+REFUND_DELAY_HOURS = 1
 
 
 async def get_due_refunds():
@@ -498,13 +541,6 @@ async def mark_refund_done(refund_id):
     await db.pending_refunds.update_one(
         {"_id": refund_id},
         {"$set": {"status": "done", "processed_at": datetime.now(timezone.utc)}},
-    )
-
-
-async def cancel_pending_refund(phone_number: str, user_id: int):
-    await db.pending_refunds.update_many(
-        {"phone_number": phone_number, "user_id": user_id, "status": "pending"},
-        {"$set": {"status": "cancelled"}},
     )
 
 
@@ -719,10 +755,6 @@ async def get_category_price(country_code: str, year: int | None, email_added: b
     return None
 
 
-async def get_category_prices(country_code: str) -> list:
-    return await db.category_pricing.find({"country_code": country_code}).to_list(None)
-
-
 async def set_category_price(country_code: str, year: int | None, email_added: bool | None, price: int):
     y = year if year is not None else 2025
     e = bool(email_added)
@@ -780,16 +812,13 @@ async def is_referral_rewarded(telegram_id: int) -> bool:
     return user is not None and user.get("referral_verify_rewarded", False)
 
 
-async def mark_referral_purchase_rewarded(telegram_id: int):
+async def add_referral_withdrawable_earning(telegram_id: int, amount: int):
+    """Credit referral purchase commission into the referrer's withdrawable balance."""
     await db.users.update_one(
         {"telegram_id": telegram_id},
-        {"$set": {"referral_purchase_rewarded": True}},
+        {"$inc": {"referral_earned": amount, "balance": amount}},
     )
 
-
-async def is_referral_purchase_rewarded(telegram_id: int) -> bool:
-    user = await get_user(telegram_id)
-    return user is not None and user.get("referral_purchase_rewarded", False)
 
 
 async def top_buyer_24h():
@@ -927,29 +956,9 @@ async def mark_sell_listing_sold(listing_id, buyer_id: int, sale_price: int) -> 
     return doc
 
 
-async def get_sell_listing_by_phone(phone_number: str) -> dict | None:
-    """Look up a sell listing by phone number (any status)."""
-    return await db.sell_listings.find_one({"phone_number": phone_number})
-
-
-async def get_pending_price_listings() -> list:
-    """Return all listings awaiting a category price from admin."""
-    return await db.sell_listings.find({"status": "pending_price"}).sort("created_at", 1).to_list(None)
-
-
 async def get_user_sell_listings(seller_id: int) -> list:
     """Return all listings submitted by this seller, newest first."""
     return await db.sell_listings.find({"seller_id": seller_id}).sort("created_at", -1).to_list(None)
-
-
-async def get_sell_listing_stats() -> dict:
-    """Aggregate counts by status for admin stats."""
-    result = {}
-    async for doc in db.sell_listings.aggregate([
-        {"$group": {"_id": "$status", "n": {"$sum": 1}}}
-    ]):
-        result[doc["_id"] or "unknown"] = doc["n"]
-    return result
 
 
 async def check_and_activate_pending_listings(country_code: str, year: int | None, email_added: bool | None) -> list:

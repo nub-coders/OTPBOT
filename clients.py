@@ -153,7 +153,7 @@ async def _on_new_message(client: Client, message):
                 log.error("[%s] Failed to forward msg to %d: %s", phone, user_id, e)
 
 
-def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False):
+def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False, credits_deducted: int = 0, balance_deducted: int = 0):
     if phone in active_requests and active_requests[phone].get("timer"):
         active_requests[phone]["timer"].cancel()
 
@@ -163,6 +163,8 @@ def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, 
         "user_id": user_id,
         "timer": timer,
         "price": price,
+        "credits_deducted": credits_deducted if (credits_deducted or balance_deducted) else price,
+        "balance_deducted": balance_deducted,
         "otp_received": False,
         "no_sale": no_sale,   # seller logging into their OWN listing — never mark sold
     }
@@ -202,20 +204,26 @@ async def _on_timeout(phone: str):
         log.info("[%s] Timeout — seller self-login, NOT marked sold", phone)
     else:
         if price > 0:
-            await db.add_credits(user_id, price)
-            log.info("[%s] Timeout — no OTP, refunded %d credits to user %d", phone, price, user_id)
-            if bot_app:
-                try:
-                    await bot_app.send_message(
-                        user_id,
-                        f"⏱ **Session expired** for `{phone}`\n\n"
-                        f"No OTP was received.\n"
-                        f"💰 **{price} credits** refunded.",
-                    )
-                except Exception as e:
-                    log.error("[%s] Failed to notify timeout: %s", phone, e)
+            cd = req.get("credits_deducted", price)
+            bd = req.get("balance_deducted", 0)
+            await db.restore_purchase_funds(user_id, cd, bd)
+            log.info("[%s] Timeout — no OTP, refunded (credits=%d, balance=%d) to user %d", phone, cd, bd, user_id)
         else:
             log.info("[%s] Timeout — no OTP, free assignment (no refund)", phone)
+
+        restored = await db.restore_offer(user_id)
+        if bot_app:
+            offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
+            refund_line = f"💰 **{price} credits** refunded." if price > 0 else ""
+            try:
+                await bot_app.send_message(
+                    user_id,
+                    f"⏱ **Session expired** for `{phone}`\n\n"
+                    f"No OTP was received.\n"
+                    f"{refund_line}{offer_line}",
+                )
+            except Exception as e:
+                log.error("[%s] Failed to notify timeout: %s", phone, e)
 
     await stop_session(phone)
     log.info("[%s] Timeout cleanup complete", phone)
@@ -524,9 +532,9 @@ async def _pick_probe_candidates(exclude_phone: str, limit: int = 3) -> list[dic
     return candidates[:limit]
 
 
-async def _read_reg_month_from_observer(observer_session: str, observer_phone: str, target_user_id: int) -> str | None:
+async def _read_reg_month_from_observer(observer_session: str, observer_phone: str, target_user_id: int, target_phone: str = None) -> str | None:
     """Start an observer account (B) from its session string and read the
-    registration_month of `target_user_id` (A) via GetFullUser + PeerSettings.
+    registration_month of `target_user_id` / `target_phone` (A) via GetFullUser + PeerSettings.
 
     A must have already messaged B for Telegram to populate registration_month.
     Reuses an already-running client if the observer is in active_clients.
@@ -553,19 +561,19 @@ async def _read_reg_month_from_observer(observer_session: str, observer_phone: s
             return None
 
     try:
-        peer = await client.resolve_peer(target_user_id)
+        peer = await client.resolve_peer(target_phone or target_user_id)
         full_user = await client.invoke(GetFullUser(id=peer))
         user_full_info = getattr(full_user, "full_user", full_user)
         settings = getattr(user_full_info, "settings", getattr(full_user, "settings", None))
         reg_month = getattr(settings, "registration_month", None) if settings else None
         # Remove the probe conversation from the observer's chat list entirely.
         try:
-            await client.delete_chat_history(target_user_id, revoke=True)
+            await client.delete_chat_history(target_phone or target_user_id, revoke=True)
         except Exception as e:
             log.info("[probe] observer %s failed to clear chat history: %s", observer_phone, e)
         return reg_month
     except Exception as e:
-        log.warning("[probe] observer %s GetFullUser(%s) failed: %s", observer_phone, target_user_id, e)
+        log.warning("[probe] observer %s GetFullUser(%s) failed: %s", observer_phone, target_phone or target_user_id, e)
         return None
     finally:
         if started_here:
@@ -614,7 +622,7 @@ async def probe_registration_month(client: Client, target_user_id: int, target_p
 
         # Send succeeded — observer can now read A's registration_month and then
         # clear the probe chat for BOTH sides from its own account (revoke=True).
-        reg_month = await _read_reg_month_from_observer(obs_session, obs_phone, target_user_id)
+        reg_month = await _read_reg_month_from_observer(obs_session, obs_phone, target_user_id, target_phone)
 
         if reg_month:
             log.info("[probe] %s: registration_month=%s via observer %s", target_phone, reg_month, obs_phone)

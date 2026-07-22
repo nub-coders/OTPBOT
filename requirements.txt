@@ -2,5 +2,4 @@ kurigram
 motor
 python-dotenv
 tgcrypto
-razorpay
 aiohttp

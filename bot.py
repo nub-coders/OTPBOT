@@ -164,8 +164,8 @@ async def alert(bot: Client, text: str):
 VERIFICATION_ENABLED = bool(ENABLE_VERIFICATION and TURNSTILE_SITE_KEY and VERIFY_URL)
 
 
-async def _check_referral_reward(user_id: int):
-    if await db.is_referral_purchase_rewarded(user_id):
+async def _check_referral_reward(user_id: int, purchased_credits: int):
+    if not user_id or purchased_credits <= 0:
         return
     user = await db.get_user(user_id)
     if not user:
@@ -176,21 +176,24 @@ async def _check_referral_reward(user_id: int):
     referrer = await db.get_user(referrer_id)
     if not referrer:
         return
-    await db.mark_referral_purchase_rewarded(user_id)
-    if REFERRAL_BONUS > 0:
-        await db.add_referral_earning(referrer_id, REFERRAL_BONUS)
+
+    commission = int(purchased_credits * 0.05)
+    if commission > 0:
+        await db.add_referral_withdrawable_earning(referrer_id, commission)
         try:
             uname = user.get("first_name") or user.get("username") or str(user_id)
-            new_balance = await db.get_credits(referrer_id)
+            new_withdrawable = await db.get_balance(referrer_id)
             await bot.send_message(
                 referrer_id,
-                f"{em.GIFT} **Referral Reward!**\n\n"
-                f"Your referral **{uname}** made their first purchase.\n"
-                f"{em.MONEY} +{REFERRAL_BONUS} credits added!\n"
-                f"{em.MONEY} Balance: **{new_balance}**",
+                f"{em.GIFT} **Referral Purchase Reward! (5%)**\n\n"
+                f"Your referral **{uname}** purchased **{purchased_credits} credits**.\n"
+                f"{em.MONEY} +{commission} credits added to your **Withdrawable Balance**!\n"
+                f"💰 Withdrawable Balance: **{new_withdrawable}**",
             )
-        except Exception:
-            pass
+            log.info("Referral commission: %d credits to referrer %d for user %d purchase of %d credits", commission, referrer_id, user_id, purchased_credits)
+        except Exception as e:
+            log.warning("Failed to notify referrer %d of commission: %s", referrer_id, e)
+
 
 
 def verified(func):
@@ -426,7 +429,7 @@ def _register_handlers(app: Client):
                 return
 
         is_adm = await db.is_admin(user_id)
-        credits = await db.get_credits(user_id)
+        credits, balance, total_funds = await db.get_total_funds(user_id)
 
         fname = (message.from_user.first_name or "there").strip()
         is_returning = user is not None  # user was fetched above; None means brand new
@@ -457,7 +460,8 @@ def _register_handlers(app: Client):
             f"{em.GLOBE} **Global** — accounts across many countries\n"
             f"{em.GIFT} **Referrals & offers** — earn and save as you go"
             f"</blockquote>\n\n"
-            f"{em.MONEY} Your balance: **{credits}** credits{offer_block}\n\n"
+            f"{em.CREDIT} Credits: **{credits}** (purchase only)\n"
+            f"{em.MONEY} Withdrawable Balance: **{balance}** credits (purchase & withdrawal){offer_block}\n\n"
             f"{em.IDEA} Pick an option below to begin:",
             reply_markup=main_menu_kb(is_adm),
         )
@@ -466,8 +470,11 @@ def _register_handlers(app: Client):
     @verified
     async def cb_main_menu(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
-        credits = await db.get_credits(cq.from_user.id)
-        credit_line = f"\n{em.MONEY} Credits: **{credits}**"
+        credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
+        credit_line = (
+            f"\n{em.CREDIT} Credits: **{credits}** (purchase only)\n"
+            f"{em.MONEY} Withdrawable Balance: **{balance}** credits (purchase & withdrawal)"
+        )
         if cq.message.video or cq.message.photo:
             try:
                 await cq.message.delete()
@@ -514,8 +521,8 @@ def _register_handlers(app: Client):
             f"{em.GIFT} **Refer & Earn**\n\n"
             f"Share your referral link and earn credits!\n\n"
             f"<blockquote>"
-            f"{em.SHIELD} **{REFERRAL_VERIFY_BONUS} credits** when your friend {'verifies' if VERIFICATION_ENABLED else 'joins'}\n"
-            f"{em.CREDIT} **{REFERRAL_BONUS} credits** on their first purchase"
+            f"{em.SHIELD} **{REFERRAL_VERIFY_BONUS} credit** (non-withdrawable) when your friend {'verifies' if VERIFICATION_ENABLED else 'joins'}\n"
+            f"{em.MONEY} **5% of purchase amount** (withdrawable balance) every time your friend buys credits"
             f"</blockquote>\n\n"
             f"{em.LINK} **Your link:**\n`{ref_link}`\n\n"
             f"{em.USERS} Referrals: **{ref_count}**\n"
@@ -2127,7 +2134,7 @@ def _register_handlers(app: Client):
             f"Select an account to buy:\n"
             f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} minutes.{page_label}\n\n"
             f"{em.INFO} **Note:** Your credits are deducted when you pick an account\n"
-            f"and refunded after 2 hours if you release it manually.",
+            f"and refunded after 1 hour if you release it manually.",
             reply_markup=InlineKeyboardMarkup(page_btns + footer),
         )
 
@@ -2166,34 +2173,28 @@ def _register_handlers(app: Client):
         offer = await db.get_active_offer(cq.from_user.id)
         price = apply_discount(base_price, offer)
 
-        credits = await db.get_credits(cq.from_user.id)
-        # A fully-covered number is free only for users who hold real credits;
-        # a user with a zero balance pays a minimum of 1 credit.
-        if price == 0 and credits <= 0:
+        credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
+        # A fully-covered number is free only for users who hold real funds;
+        # a user with zero funds pays a minimum of 1 credit.
+        if price == 0 and total_funds <= 0:
             price = 1
         saved = base_price - price
 
-        if credits < price:
-            # Not enough credits — auto-generate a top-up QR for exactly the
-            # shortfall so the user can pay and have the number assigned
-            # automatically once the payment lands.
-            await _start_shortfall_topup(cq, phone, cc, base_price, price, credits, saved)
+        if total_funds < price:
+            await _start_shortfall_topup(cq, phone, cc, base_price, price, total_funds, saved)
             return
 
         await _finalize_purchase(cq.from_user.id, phone, edit_msg=cq.message)
 
-    async def _start_shortfall_topup(cq, phone, cc, base_price, price, credits, saved):
-        """Generate a Razorpay QR for (effective price − credits) and, once paid,
+    async def _start_shortfall_topup(cq, phone, cc, base_price, price, total_funds, saved):
+        """Generate a Razorpay QR for (effective price − total_funds) and, once paid,
         assign the selected number automatically."""
-        shortfall = price - credits
+        shortfall = price - total_funds
 
-        # Razorpay UPI QR codes have a ₹1 minimum, but we only auto-generate a QR
-        # when the top-up is at least 10 credits (₹10); smaller shortfalls are
-        # nudged to the Buy Credits menu instead.
         if shortfall < 10:
             await cq.answer(
                 f"{em.ERROR} You need {shortfall} more credit(s) for this account "
-                f"({price} needed, you have {credits}).\n\n"
+                f"({price} needed, you have {total_funds} total funds).\n\n"
                 f"Top-ups start at 10 credits — tap Buy Credits.",
                 show_alert=True,
             )
@@ -2202,7 +2203,7 @@ def _register_handlers(app: Client):
                 f"{em.MONEY} **Not enough credits**\n\n"
                 f"{em.PHONE} `{mask_phone(phone)}`\n"
                 f"{em.CREDIT} Price: **{price}** credits{offer_line}\n"
-                f"{em.MONEY} Your balance: **{credits}** credits\n"
+                f"{em.MONEY} Available funds: **{total_funds}** credits\n"
                 f"{em.WARNING} Shortfall: **{shortfall}** credit(s)\n\n"
                 "Auto top-up needs at least 10 credits. Tap below to buy credits.",
                 reply_markup=back_kb("buy_credits"),
@@ -2308,9 +2309,11 @@ def _register_handlers(app: Client):
         else:
             if price > 0:
                 await db.save_pending_refund(user_id, phone, price)
+            restored = await db.restore_offer(user_id, delay_hours=1 if price > 0 else 0)
+            offer_line = f"\n{em.GIFT} **Discount offer restored!**" if restored else ""
             await safe_edit(cq.message,
                 f"{em.UNLOCK} `{mask_phone(phone)}` released.\n\n"
-                f"{em.MONEY} **{price} credits** will be refunded in **2 hours**.",
+                f"{em.MONEY} **{price} credits** will be refunded in **1 hour**.{offer_line}",
                 reply_markup=back_kb("main_menu"),
             )
 
@@ -2367,7 +2370,7 @@ def _register_handlers(app: Client):
     @verified
     async def cb_buy_credits(_, cq: CallbackQuery):
         auth_states.pop(cq.from_user.id, None)
-        credits = await db.get_credits(cq.from_user.id)
+        credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
         buttons = [
             [
                 InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans", style=S.SUCCESS),
@@ -2377,7 +2380,8 @@ def _register_handlers(app: Client):
         ]
         await safe_edit(cq.message,
             f"{em.CREDIT} **Buy Credits**\n\n"
-            f"{em.MONEY} Your balance: **{credits}**\n\n"
+            f"{em.CREDIT} Credits: **{credits}** (purchase only)\n"
+            f"{em.MONEY} Withdrawable Balance: **{balance}** credits (purchase & withdrawal)\n\n"
             "Choose a payment method:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -3752,22 +3756,26 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
                 reply_markup=back_kb("main_menu"))
             return False
 
-    # price may be 0 when a discount fully covers it — that's a free number,
-    # so skip deduction (a $inc of -0 would report no change and misfire).
-    if price > 0 and not await db.deduct_credits(user_id, price):
-        await clients.stop_session(phone)
-        await _send_or_edit(user_id, edit_msg,
-            f"{em.ERROR} Could not deduct credits. Please try again or contact support.",
-            reply_markup=back_kb("main_menu"))
-        return False
-    log.info("Deducted %d credits from user %d on selection", price, user_id)
+    credits_deducted, balance_deducted = 0, 0
+    if price > 0:
+        ok, credits_deducted, balance_deducted = await db.deduct_funds_for_purchase(user_id, price)
+        if not ok:
+            await clients.stop_session(phone)
+            await _send_or_edit(user_id, edit_msg,
+                f"{em.ERROR} Could not deduct funds. Please try again or contact support.",
+                reply_markup=back_kb("main_menu"))
+            return False
+        log.info("Deducted %d credits and %d balance from user %d on selection", credits_deducted, balance_deducted, user_id)
 
-    clients.assign_number(phone, user_id, OTP_TIMEOUT, price)
+    if offer:
+        await db.consume_offer(user_id)
+
+    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted)
 
     uname = user.get("username") or user.get("first_name") or str(user_id)
     flag = get_country_flag(cc)
     name = get_country_name(cc)
-    credits = await db.get_credits(user_id)
+    credits, balance, total_funds = await db.get_total_funds(user_id)
     admin_price_line = f"{em.MONEY} Price: **{price}** credits (paid)\n"
     if saved > 0:
         paid_display = "**FREE** (0 paid)" if price == 0 else f"**{price}** credits paid"
@@ -3784,12 +3792,12 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{em.PHONE} Number: `{phone}`\n"
         f"{flag} Country: {name}\n"
         f"{admin_price_line}"
-        f"{em.MONEY} Remaining balance: **{credits}**"
+        f"{em.MONEY} Remaining funds: **{total_funds}** ({credits} credits, {balance} withdrawable)"
     )
     req_info = clients.active_requests.get(phone)
     if req_info is not None:
         req_info["purchase_alert"] = purchase_alert
-    credit_line = f"\n{em.MONEY} Credits: {credits}"
+    credit_line = f"\n{em.CREDIT} Credits: {credits}\n{em.MONEY} Withdrawable Balance: {balance}"
     acc_year = session.get("account_year")
     age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
     email_added = session.get("email_added", False)
@@ -3810,7 +3818,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{price_line}"
         f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
         "The login OTP for this account will be forwarded to you here.\n\n"
-        f"{em.WARNING} On manual release, your credits will be locked for 2 hours.\n\n"
+        f"{em.WARNING} On manual release, your credits will be locked for 1 hour.\n\n"
         f"{em.WARNING} Issues logging in? Contact support:\n{support}",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
@@ -3915,7 +3923,7 @@ async def award_razorpay_payment(user_id: int, qr_id: str, plan_key: str,
 
     await db.add_credits(user_id, plan["credits"])
     await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
-    await _check_referral_reward(user_id)
+    await _check_referral_reward(user_id, plan["credits"])
     new_balance = await db.get_credits(user_id)
     buyer = await db.get_user(user_id)
     buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
@@ -4038,7 +4046,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
     await db.mark_tx_used(tx_hash, user_id, plan_key)
     await db.add_credits(user_id, plan["credits"])
     await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
-    await _check_referral_reward(user_id)
+    await _check_referral_reward(user_id, plan["credits"])
     new_balance = await db.get_credits(user_id)
     buyer = await db.get_user(user_id)
     buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
