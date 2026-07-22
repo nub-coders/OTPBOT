@@ -3,7 +3,9 @@ import hashlib
 import time
 import logging
 import aiohttp
-import razorpay
+import base64
+import json
+import urllib.request
 from decimal import Decimal
 from config import (
     RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET,
@@ -12,12 +14,24 @@ from config import (
 
 log = logging.getLogger(__name__)
 
-razor_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
+def _razorpay_request(method: str, path: str, data: dict = None) -> dict:
+    url = f"https://api.razorpay.com/v1/{path.lstrip('/')}"
+    auth_str = f"{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}"
+    auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+    headers = {
+        "Authorization": f"Basic {auth_b64}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(data).encode("utf-8") if data is not None else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def create_razorpay_qr(plan_label: str, amount_paisa: int, user_id: int = 0) -> dict | None:
     try:
-        return razor_client.qrcode.create({
+        return _razorpay_request("POST", "payments/qr_codes", {
             "type": "upi_qr",
             "name": plan_label,
             "usage": "single_use",
@@ -38,7 +52,7 @@ def create_razorpay_qr(plan_label: str, amount_paisa: int, user_id: int = 0) -> 
 
 def check_razorpay_payment(qr_id: str, expected_amount: int) -> str:
     try:
-        status = razor_client.qrcode.fetch(qr_id)
+        status = _razorpay_request("GET", f"payments/qr_codes/{qr_id}")
         if status.get("payments_amount_received", 0) >= expected_amount:
             return "paid"
         if status.get("status") == "closed":

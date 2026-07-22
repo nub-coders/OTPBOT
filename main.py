@@ -29,13 +29,17 @@ async def recover_orphaned_assignments(bot):
             log.info("[%s] Orphan — OTP was received, marked sold", phone)
         else:
             if price > 0:
-                await db.add_credits(user_id, price)
+                cd = a.get("credits_deducted", price)
+                bd = a.get("balance_deducted", 0)
+                await db.restore_purchase_funds(user_id, cd, bd)
+            restored = await db.restore_offer(user_id)
+            offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
             log.info("[%s] Orphan — no OTP, refunded %d credits to user %d", phone, price, user_id)
             try:
                 await bot.send_message(
                     user_id,
                     f"⚠️ **Bot restarted** — your session for `{phone}` was interrupted.\n\n"
-                    f"💰 **{price} credits** have been refunded.",
+                    f"💰 **{price} credits** have been refunded.{offer_line}",
                 )
             except Exception:
                 pass
@@ -96,6 +100,7 @@ async def refund_processor(bot):
                 user_id = refund["user_id"]
                 amount = refund["amount"]
                 await db.add_credits(user_id, amount)
+                restored = await db.restore_offer(user_id, grace_minutes=15)
                 await db.mark_refund_done(refund["_id"])
                 new_balance = await db.get_credits(user_id)
                 log.info("Refund processed: %d credits to user %d", amount, user_id)
@@ -107,13 +112,14 @@ async def refund_processor(bot):
                     f"➕ Credits: +{amount}\n"
                     f"💰 New balance: {new_balance}"
                 )
+                offer_line = "\n🎁 **Discount offer active!** (15 min grace window)" if restored else ""
                 try:
                     await bot.send_message(
                         user_id,
                         f"💰 **Credits refunded!**\n\n"
                         f"📱 Number: `{phone}`\n"
                         f"➕ **{amount}** credits returned to your account.\n"
-                        f"💰 New balance: **{new_balance}**",
+                        f"💰 New balance: **{new_balance}**{offer_line}",
                     )
                 except Exception:
                     pass

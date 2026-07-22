@@ -34,7 +34,7 @@ TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 VERIFY_URL = os.getenv("VERIFY_URL", "")
 VERIFY_PORT = int(os.getenv("VERIFY_PORT", "8888"))
 
-REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "5"))
+REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "0"))
 REFERRAL_VERIFY_BONUS = int(os.getenv("REFERRAL_VERIFY_BONUS", "1"))
 
 # ── Purchased-account securing (seller submissions) ──
