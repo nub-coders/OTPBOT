@@ -70,6 +70,37 @@ COUNTRY_CODES = [
     ("855", "KH", "Cambodia", "\U0001f1f0\U0001f1ed"),
     ("237", "CM", "Cameroon", "\U0001f1e8\U0001f1f2"),
     ("1", "US", "United States", "\U0001f1fa\U0001f1f8"),
+    ("1403", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1416", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1431", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1437", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1438", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1450", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1506", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1514", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1548", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1579", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1581", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1587", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1604", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1613", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1639", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1647", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1672", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1705", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1709", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1742", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1778", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1780", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1782", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1807", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1819", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1825", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1867", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1873", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1902", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1905", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
+    ("1942", "CA", "Canada", "\U0001f1e8\U0001f1e6"),
     ("56", "CL", "Chile", "\U0001f1e8\U0001f1f1"),
     ("86", "CN", "China", "\U0001f1e8\U0001f1f3"),
     ("57", "CO", "Colombia", "\U0001f1e8\U0001f1f4"),
@@ -167,7 +198,9 @@ _CODE_MAP = {code: (name, flag) for _, code, name, flag in COUNTRY_CODES}
 
 def detect_country(phone: str) -> tuple[str, str, str]:
     """Returns (code, name, flag) from a phone number. Falls back to XX/Unknown."""
-    digits = phone.lstrip("+")
+    if not phone:
+        return "XX", "Unknown", "\U0001f3f3️"
+    digits = re.sub(r"\D", "", str(phone))
     for prefix, code, name, flag in _PREFIX_MAP:
         if digits.startswith(prefix):
             return code, name, flag
