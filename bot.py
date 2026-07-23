@@ -22,7 +22,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, SELLER_PAYOUT_PERCENT
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
 import database as db
 import clients
 import payments
@@ -76,8 +76,9 @@ def get_crypto_plan(plan_key: str) -> dict | None:
 def _random_discount_credits() -> int:
     """Pick a random flat credit discount biased toward the minimum.
 
-    Squaring a [0,1) random draw skews the result low, so most users land
-    near OFFER_MIN_CREDITS and only a few reach OFFER_MAX_CREDITS.
+    Higher skew values make larger discounts rarer. The default exponent of
+    OFFER_DISCOUNT_SKEW is 3.0 to reduce the chance of getting the higher
+    discount values near OFFER_MAX_CREDITS.
     """
     import random
 
@@ -85,7 +86,7 @@ def _random_discount_credits() -> int:
     if hi <= lo:
         return lo
     span = hi - lo
-    biased = random.random() ** 2  # skew toward 0
+    biased = random.random() ** OFFER_DISCOUNT_SKEW  # skew toward 0
     return lo + int(round(biased * span))
 
 
@@ -109,17 +110,29 @@ def apply_discount(price: int, offer: dict | None) -> int:
     return max(0, price - credits_off)
 
 
-async def maybe_grant_offer(telegram_id: int) -> dict | None:
-    """Grant a new random discount offer if eligible; return the active offer
-    (newly granted or already running), or None."""
+async def maybe_grant_offer(telegram_id: int) -> tuple[dict | None, bool]:
+    """Try to grant a new random active discount offer.
+
+    Returns (offer, granted).
+    `offer` is the active offer if one exists or was created.
+    `granted` is True only when a new offer was created now.
+    """
     active = await db.get_active_offer(telegram_id)
     if active:
-        return active
+        return active, False
     if not await db.can_grant_offer(telegram_id):
-        return None
+        return None, False
+
+    if OFFER_RECENT_PURCHASE_DAYS > 0 and await db.has_recent_purchase(telegram_id, OFFER_RECENT_PURCHASE_DAYS):
+        return None, False
+
+    import random
+
+    if OFFER_GRANT_CHANCE < 1.0 and random.random() >= OFFER_GRANT_CHANCE:
+        return None, False
     credits = _random_discount_credits()
     hours = _random_offer_hours()
-    return await db.set_offer(telegram_id, credits, hours)
+    return await db.set_offer(telegram_id, credits, hours), True
 
 
 def offer_banner(offer: dict | None) -> str:
@@ -196,10 +209,77 @@ async def _check_referral_reward(user_id: int, purchased_credits: int):
 
 
 
+_daily_discount_lock = asyncio.Lock()
+
+
+async def _process_daily_discounts(client):
+    """Grant random discount offers to up to 5 eligible non-admin users."""
+    try:
+        users = await db.get_all_users()
+        import random
+        random.shuffle(users)
+        granted_count = 0
+        for u in users:
+            if granted_count >= 5:
+                break
+            uid = u.get("telegram_id")
+            if not uid or await db.is_admin(uid):
+                continue
+            offer, granted = await maybe_grant_offer(uid)
+            if granted and offer:
+                granted_count += 1
+                credits = offer.get("credits", 0)
+                expires_at = offer.get("expires_at")
+                hours = 4
+                if expires_at:
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    hours = max(1, int((expires_at - datetime.now(timezone.utc)).total_seconds() // 3600))
+                try:
+                    await client.send_message(
+                        uid,
+                        f"🎁 **Special Daily Discount Offer!**\n\n"
+                        f"You've been selected for a discount of **{credits} credits** off per account purchase!\n"
+                        f"⏰ Valid for the next **{hours} hours**.\n"
+                        f"Check out the catalog to buy your account now!"
+                    )
+                except Exception as e:
+                    log.warning("Could not notify user %s of daily discount: %s", uid, e)
+    except Exception as e:
+        log.error("Error in _process_daily_discounts: %s", e)
+
+
+async def _check_and_trigger_daily_discounts(client):
+    """Check if 24h have passed since last daily discount run; if so, trigger background task."""
+    # ponytail: naive lock ceiling: Mongo single instance timestamp check
+    async with _daily_discount_lock:
+        now = datetime.now(timezone.utc)
+        last_run = await db.get_last_daily_discount_time()
+        if last_run:
+            if last_run.tzinfo is None:
+                last_run = last_run.replace(tzinfo=timezone.utc)
+            if (now - last_run).total_seconds() < 86400:
+                return
+        await db.set_last_daily_discount_time(now)
+    await _process_daily_discounts(client)
+
+
+def check_daily_discount(func):
+    """Decorator for Pyrogram handlers to check if 24h passed and spawn background discount task."""
+    from functools import wraps
+    @wraps(func)
+    async def wrapper(client, update, *args, **kwargs):
+        asyncio.create_task(_check_and_trigger_daily_discounts(client))
+        return await func(client, update, *args, **kwargs)
+    return wrapper
+
+
 def verified(func):
     from functools import wraps
     @wraps(func)
     async def wrapper(client, update, *args, **kwargs):
+        asyncio.create_task(_check_and_trigger_daily_discounts(client))
+
         if VERIFICATION_ENABLED:
             tg_user = update.from_user
             user_id = tg_user.id
@@ -436,7 +516,7 @@ def _register_handlers(app: Client):
 
         offer_block = ""
         if not is_adm:
-            offer = await maybe_grant_offer(user_id)
+            offer = await db.get_active_offer(user_id)
             banner = offer_banner(offer)
             if banner:
                 offer_block = (
@@ -471,6 +551,7 @@ def _register_handlers(app: Client):
     async def cb_main_menu(_, cq: CallbackQuery):
         is_adm = await db.is_admin(cq.from_user.id)
         credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
+        offer_notice = ""
         credit_line = (
             f"\n{em.CREDIT} Credits: **{credits}** (purchase only)\n"
             f"{em.MONEY} Withdrawable Balance: **{balance}** credits (purchase & withdrawal)"
@@ -484,6 +565,7 @@ def _register_handlers(app: Client):
                 chat_id=cq.from_user.id,
                 text=(
                     f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
+                    f"{offer_notice}"
                     f"Buy credits, grab a Telegram account, and get its login OTP instantly.{credit_line}"
                 ),
                 reply_markup=main_menu_kb(is_adm),
@@ -491,6 +573,7 @@ def _register_handlers(app: Client):
         else:
             await safe_edit(cq.message,
                 f"{em.WAVE} **OTP Bot — Main Menu**\n\n"
+                f"{offer_notice}"
                 f"Buy credits, grab a Telegram account, and get its login OTP instantly.{credit_line}",
                 reply_markup=main_menu_kb(is_adm),
             )

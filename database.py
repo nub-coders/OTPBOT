@@ -294,6 +294,16 @@ async def set_offer(telegram_id: int, credits: int, duration_hours: float):
     return offer
 
 
+async def get_last_daily_discount_time() -> datetime | None:
+    doc = await db.system.find_one({"_id": "daily_discount"})
+    return doc.get("last_run") if doc else None
+
+
+async def set_last_daily_discount_time(dt: datetime):
+    await db.system.update_one({"_id": "daily_discount"}, {"$set": {"last_run": dt}}, upsert=True)
+
+
+
 # ── Sessions ──
 
 async def save_session(phone_number: str, session_string: str, added_by: int,
@@ -416,6 +426,19 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> 
 
 async def get_sold_sessions():
     return await db.sessions.find({"status": "sold"}).sort("sold_at", -1).to_list(None)
+
+
+async def has_recent_purchase(telegram_id: int, days: int) -> bool:
+    """Return whether the user bought any number within the last `days` days."""
+    if days <= 0:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    count = await db.sessions.count_documents({
+        "status": "sold",
+        "sold_to": telegram_id,
+        "sold_at": {"$gte": cutoff},
+    })
+    return count > 0
 
 
 async def set_session_password(phone_number: str, password: str):
