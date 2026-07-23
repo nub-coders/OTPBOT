@@ -52,6 +52,10 @@ async def get_all_users():
     return await db.users.find().to_list(None)
 
 
+async def admin_count() -> int:
+    return await db.users.count_documents({"role": "admin"})
+
+
 # ── Verification ──
 
 async def is_verified(telegram_id: int) -> bool:
@@ -323,6 +327,10 @@ async def get_session(phone_number: str):
     return await db.sessions.find_one({"phone_number": phone_number})
 
 
+async def get_all_sessions():
+    return await db.sessions.find().to_list(None)
+
+
 async def get_active_sessions():
     return await db.sessions.find({"status": "active"}).to_list(None)
 
@@ -401,6 +409,16 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> 
     return None
 
 
+async def get_sold_sessions():
+    return await db.sessions.find({"status": "sold"}).sort("sold_at", -1).to_list(None)
+
+
+async def set_session_password(phone_number: str, password: str):
+    await db.sessions.update_one(
+        {"phone_number": phone_number},
+        {"$set": {"password": password}},
+    )
+
 
 async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None):
     update_doc = {"account_id": account_id, "account_year": account_year}
@@ -454,6 +472,12 @@ async def save_otp(phone_number: str, code: str, message: str, sender: str, requ
     }
     await db.otps.insert_one(doc)
     return doc
+
+
+async def get_user_otps(telegram_id: int, limit: int = 100):
+    return await db.otps.find(
+        {"requested_by": telegram_id},
+    ).sort("created_at", -1).limit(limit).to_list(limit)
 
 
 
@@ -517,6 +541,19 @@ async def get_pending_payments():
     return await db.pending_payments.find({"status": "pending"}).to_list(None)
 
 
+async def get_pending_payment(qr_id: str):
+    return await db.pending_payments.find_one({"qr_id": qr_id})
+
+
+async def mark_pending_payment_done(qr_id: str) -> bool:
+    """Atomically flip pending→done. Returns True if this call did the flip."""
+    r = await db.pending_payments.update_one(
+        {"qr_id": qr_id, "status": "pending"},
+        {"$set": {"status": "done", "paid_at": datetime.now(timezone.utc)}},
+    )
+    return r.modified_count == 1
+
+
 async def mark_pending_payment_expired(qr_id: str):
     await db.pending_payments.update_one(
         {"qr_id": qr_id},
@@ -527,6 +564,17 @@ async def mark_pending_payment_expired(qr_id: str):
 # ── Pending Refunds ──
 
 REFUND_DELAY_HOURS = 1
+
+
+async def save_pending_refund(user_id: int, phone_number: str, amount: int):
+    await db.pending_refunds.insert_one({
+        "user_id": user_id,
+        "phone_number": phone_number,
+        "amount": amount,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc),
+        "refund_at": datetime.now(timezone.utc) + timedelta(hours=REFUND_DELAY_HOURS),
+    })
 
 
 async def get_due_refunds():
@@ -755,6 +803,10 @@ async def get_category_price(country_code: str, year: int | None, email_added: b
     return None
 
 
+async def get_category_prices(country_code: str) -> list:
+    return await db.category_pricing.find({"country_code": country_code}).to_list(None)
+
+
 async def set_category_price(country_code: str, year: int | None, email_added: bool | None, price: int):
     y = year if year is not None else 2025
     e = bool(email_added)
@@ -954,6 +1006,14 @@ async def mark_sell_listing_sold(listing_id, buyer_id: int, sale_price: int) -> 
         return_document=True,
     )
     return doc
+
+
+async def get_sell_listing_by_phone(phone_number: str) -> dict | None:
+    return await db.sell_listings.find_one({"phone_number": phone_number})
+
+
+async def get_pending_price_listings() -> list:
+    return await db.sell_listings.find({"status": "pending_price"}).sort("created_at", 1).to_list(None)
 
 
 async def get_user_sell_listings(seller_id: int) -> list:
