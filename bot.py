@@ -245,8 +245,18 @@ async def _process_daily_discounts(client):
                     )
                 except Exception as e:
                     log.warning("Could not notify user %s of daily discount: %s", uid, e)
+
+        if granted_count > 0:
+            announcement = (
+                f"🎉 **Daily Discount Drop!**\n\n"
+                f"🎁 **{granted_count} lucky users** have just received special discount offers!\n"
+                f"⚡ Check your direct messages with the bot to see if you got selected.\n\n"
+                f"Keep active on the bot for a chance to get selected in the next drop! {em.ROCKET}"
+            )
+            await alert(client, announcement)
     except Exception as e:
         log.error("Error in _process_daily_discounts: %s", e)
+
 
 
 async def _check_and_trigger_daily_discounts(client):
