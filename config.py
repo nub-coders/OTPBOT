@@ -55,11 +55,20 @@ SELLER_PAYOUT_PERCENT = int(os.getenv("SELLER_PAYOUT_PERCENT", "80"))
 # user when they /start, valid for a random window, then locked out for a
 # cooldown period before another can be granted. The effective price is always
 # clamped to a minimum of 1 credit so cheap numbers never become free.
+# Set OFFER_GRANT_CHANCE to a value between 0.0 and 1.0 to make offer grants
+# happen probabilistically instead of every eligible /start.
+# OFFER_DISCOUNT_SKEW controls the discount distribution. Larger values make
+# higher discounts much rarer. A value around 31.387 makes the maximum
+# discount appear with about 0.07% probability.
 OFFER_MIN_CREDITS = int(os.getenv("OFFER_MIN_CREDITS", "2"))
 OFFER_MAX_CREDITS = int(os.getenv("OFFER_MAX_CREDITS", "25"))
 OFFER_MIN_HOURS = float(os.getenv("OFFER_MIN_HOURS", "4"))
 OFFER_MAX_HOURS = float(os.getenv("OFFER_MAX_HOURS", "6"))
 OFFER_COOLDOWN_HOURS = float(os.getenv("OFFER_COOLDOWN_HOURS", "24"))
+OFFER_GRANT_CHANCE = float(os.getenv("OFFER_GRANT_CHANCE", "1.0"))
+OFFER_RECENT_PURCHASE_DAYS = int(os.getenv("OFFER_RECENT_PURCHASE_DAYS", "14"))
+OFFER_DISCOUNT_SKEW = float(os.getenv("OFFER_DISCOUNT_SKEW", "31.387447433766166"))
+OFFER_GRANT_INTERVAL_SECONDS = int(os.getenv("OFFER_GRANT_INTERVAL_SECONDS", "300"))
 
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},
