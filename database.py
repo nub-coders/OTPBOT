@@ -2,6 +2,7 @@ import motor.motor_asyncio
 from datetime import datetime, timezone, timedelta
 from pymongo.errors import DuplicateKeyError
 from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
+from utils import detect_country
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client.otpbot
@@ -299,6 +300,10 @@ async def save_session(phone_number: str, session_string: str, added_by: int,
                        password: str = "", country_code: str = "XX",
                        account_id: int = None, account_year: int = None,
                        email_added: bool = None):
+    if not country_code or country_code == "XX":
+        detected, _, _ = detect_country(phone_number)
+        if detected != "XX":
+            country_code = detected
     doc = {
         "phone_number": phone_number,
         "session_string": session_string,

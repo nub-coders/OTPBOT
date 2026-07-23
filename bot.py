@@ -3667,6 +3667,10 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         return False
 
     cc = session.get("country_code", "XX")
+    if not cc or cc == "XX":
+        detected_cc, _, _ = detect_country(phone)
+        if detected_cc != "XX":
+            cc = detected_cc
     base_price = await db.get_session_price(session)
     if base_price is None:
         await _send_or_edit(user_id, edit_msg,
