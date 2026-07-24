@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from pyrogram import Client, filters, enums
 
 # Shorthand for button style
@@ -218,17 +219,19 @@ async def _process_daily_discounts(client):
         users = await db.get_all_users()
         import random
         random.shuffle(users)
-        granted_count = 0
+        granted_users = []
         for u in users:
-            if granted_count >= 5:
+            if len(granted_users) >= 5:
                 break
             uid = u.get("telegram_id")
             if not uid or await db.is_admin(uid):
                 continue
             offer, granted = await maybe_grant_offer(uid)
             if granted and offer:
-                granted_count += 1
-                credits = offer.get("credits", 0)
+                credits_discount = offer.get("credits", 0)
+                await db.add_credits(uid, credits_discount)
+                current_credits = await db.get_credits(uid)
+
                 expires_at = offer.get("expires_at")
                 hours = 4
                 if expires_at:
@@ -238,21 +241,38 @@ async def _process_daily_discounts(client):
                 try:
                     await client.send_message(
                         uid,
-                        f"🎁 **Special Daily Discount Offer!**\n\n"
-                        f"You've been selected for a discount of **{credits} credits** off per account purchase!\n"
+                        f"🎁 **Special Daily Bonus Drop!**\n\n"
+                        f"🎉 You've been awarded **{credits_discount} bonus credits**!\n"
+                        f"💰 Your new balance: **{current_credits} credits**.\n"
                         f"⏰ Valid for the next **{hours} hours**.\n"
                         f"Check out the catalog to buy your account now!"
                     )
                 except Exception as e:
                     log.warning("Could not notify user %s of daily discount: %s", uid, e)
 
-        if granted_count > 0:
-            announcement = (
-                f"🎉 **Daily Discount Drop!**\n\n"
-                f"🎁 **{granted_count} lucky users** have just received special discount offers!\n"
-                f"⚡ Check your direct messages with the bot to see if you got selected.\n\n"
-                f"Keep active on the bot for a chance to get selected in the next drop! {em.ROCKET}"
-            )
+                granted_users.append({
+                    "uid": uid,
+                    "first_name": u.get("first_name", ""),
+                    "username": u.get("username", ""),
+                    "discount": credits_discount,
+                    "credits": current_credits,
+                })
+
+        if granted_users:
+            msg_blocks = [f"{em.GIFT} **Daily Discount Drop!**\n"]
+            for gu in granted_users:
+                display_name = gu["first_name"] or ""
+                username = gu["username"]
+                name_line = f"📛 Name: {display_name}"
+                user_line = f"\n👤 Username: @{username}" if username else ""
+                msg_blocks.append(
+                    f"{em.USER} **User Selected**\n"
+                    f"{em.ID_BADGE} ID: `{gu['uid']}`\n"
+                    f"{name_line}{user_line}\n"
+                    f"🎁 Bonus Granted: **+{gu['discount']} credits**\n"
+                    f"💰 Current Credits: **{gu['credits']} credits**\n"
+                )
+            announcement = "\n".join(msg_blocks)
             await alert(client, announcement)
     except Exception as e:
         log.error("Error in _process_daily_discounts: %s", e)
