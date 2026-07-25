@@ -153,7 +153,7 @@ async def _on_new_message(client: Client, message):
                 log.error("[%s] Failed to forward msg to %d: %s", phone, user_id, e)
 
 
-def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False, credits_deducted: int = 0, balance_deducted: int = 0):
+def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False, credits_deducted: int = 0, balance_deducted: int = 0, order_id: str | None = None):
     if phone in active_requests and active_requests[phone].get("timer"):
         active_requests[phone]["timer"].cancel()
 
@@ -167,8 +167,9 @@ def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, 
         "balance_deducted": balance_deducted,
         "otp_received": False,
         "no_sale": no_sale,   # seller logging into their OWN listing — never mark sold
+        "order_id": order_id,
     }
-    asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout))
+    asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout, order_id))
     log.info("[%s] Assigned to user %d (timeout=%ds, price=%d, no_sale=%s)", phone, user_id, timeout, price, no_sale)
 
 
@@ -198,7 +199,7 @@ async def _on_timeout(phone: str):
     await db.remove_active_assignment(phone)
 
     if otp_received and not req.get("no_sale"):
-        await db.mark_session_sold(phone, user_id, price)
+        await db.mark_session_sold(phone, user_id, price, req.get("order_id"))
         log.info("[%s] Timeout — OTP was received, marked sold", phone)
     elif otp_received and req.get("no_sale"):
         log.info("[%s] Timeout — seller self-login, NOT marked sold", phone)
