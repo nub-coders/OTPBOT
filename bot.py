@@ -160,6 +160,14 @@ async def safe_edit(message, text, **kwargs):
         pass
 
 
+async def _answer_cq(cq: CallbackQuery):
+    """Dismiss Telegram button loading spinner immediately so UI feels instant."""
+    try:
+        await cq.answer()
+    except Exception:
+        pass
+
+
 async def alert(bot: Client, text: str):
     """Send an alert to CHAT_ID channel, or to all admins if not configured."""
     if CHAT_ID:
@@ -1927,6 +1935,7 @@ def _register_handlers(app: Client):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
+        await _answer_cq(cq)
 
         s = await db.get_stats()
         ps = await db.get_payment_stats()
@@ -1955,8 +1964,21 @@ def _register_handlers(app: Client):
         inv = ext["inventory"]
         inv_line = " | ".join(f"{k}: {v}" for k, v in sorted(inv.items())) or "—"
 
-        activity = (
-            f"\n\n{em.CALENDAR} **Activity — 24h | 7d | 30d | all:**\n"
+        overview_block = (
+            f"<blockquote>"
+            f"{em.USERS} Users: **{s['users']}**\n"
+            f"{em.PHONE} Numbers (active): **{s['sessions']}**\n"
+            f"{em.ONLINE} Connected: **{active}**\n"
+            f"{em.LINK} Assigned now: **{assigned}**\n"
+            f"{em.MAIL} OTPs forwarded: **{s['otps']}**\n"
+            f"{em.WALLET} Outstanding credits: **{ext['outstanding_credits']}**\n"
+            f"{em.PHONE} Inventory: {inv_line}"
+            f"</blockquote>"
+        )
+
+        activity_block = (
+            f"<blockquote>"
+            f"{em.CALENDAR} **Activity — 24h | 7d | 30d | all:**\n"
             f"  {em.ADD} Numbers added: {d(ext['added'])}\n"
             f"  {em.MONEY} Numbers sold: {d(ext['sold'])}\n"
             f"  {em.DELETE} Numbers removed: {d(ext['removed'])}\n"
@@ -1964,31 +1986,35 @@ def _register_handlers(app: Client):
             f"  {em.NEW_USER} New users: {d(ext['new_users'])}\n"
             f"  {em.MAIL} OTPs forwarded: {d(ext['otps'])}\n"
             f"  {em.WARNING} Auth failures: {d(ext['auth_failures'])}"
+            f"</blockquote>"
         )
 
         st = ext["sell_through"]
         tts = ext["avg_time_to_sell"]
         tts_str = f"{tts:.1f}h" if tts is not None else "—"
-        performance = (
-            f"\n\n{em.TRENDING_UP} **Performance:**\n"
-            f"  Sell-through (24h/7d/30d/all): "
-            f"{st['24h']:.0f}% | {st['7d']:.0f}% | {st['30d']:.0f}% | {st['all']:.0f}%\n"
-            f"  Avg time-to-sell: {tts_str}"
-        )
-
         fn = ext["funnel"]
         v_pct = (fn["verified"] / fn["users"] * 100) if fn["users"] else 0
         b_pct = (fn["buyers"] / fn["users"] * 100) if fn["users"] else 0
-        funnel = (
-            f"\n\n{em.USERS} **Funnel (all-time):**\n"
+
+        performance_block = (
+            f"<blockquote>"
+            f"{em.TRENDING_UP} **Performance:**\n"
+            f"  Sell-through (24h/7d/30d/all): "
+            f"{st['24h']:.0f}% | {st['7d']:.0f}% | {st['30d']:.0f}% | {st['all']:.0f}%\n"
+            f"  Avg time-to-sell: {tts_str}\n\n"
+            f"{em.USERS} **Funnel (all-time):**\n"
             f"  Users: {fn['users']} → Verified: {fn['verified']} ({v_pct:.0f}%) "
             f"→ Buyers: {fn['buyers']} ({b_pct:.0f}%)"
+            f"</blockquote>"
         )
 
-        revenue = (
-            f"\n\n{em.BANK} **Revenue (INR-equiv):**\n"
+        revenue_block = (
+            f"<blockquote>"
+            f"{em.BANK} **Revenue (INR-equiv):**\n"
             f"  Last 24h: ₹{rev['24h']['inr']:.2f} ({rev['24h']['count']} txns)\n"
-            f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)"
+            f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)\n\n"
+            f"{em.CREDIT} **Payments by method ({ps['total_payments']}):**{pay_lines}"
+            f"</blockquote>"
         )
 
         hholder = cdist.get("highest_holder")
@@ -1997,43 +2023,36 @@ def _register_handlers(app: Client):
         else:
             highest_holder_line = f"\n  {em.OWNER} Highest holder: —"
 
-        credits_dist = (
-            f"\n\n{em.CREDIT} **Credits Distributed:**\n"
+        credits_dist_block = (
+            f"<blockquote>"
+            f"{em.CREDIT} **Credits Distributed:**\n"
             f"  {em.MONEY} Purchased: **{cdist['purchased']}** credits\n"
             f"  {em.GIFT} Discount & Bonus: **{cdist['discount']}** credits\n"
             f"  {em.DOLLAR} Withdrawable Balance: **{cdist['withdrawable']}** credits\n"
             f"  {em.WALLET} Total Distributed: **{cdist['total_distributed']}** credits"
             f"{highest_holder_line}"
+            f"</blockquote>"
         )
 
-        top_lines = f"\n\n{em.FIRE} **Leaderboard (24h):**"
-        if top_buyer:
-            top_lines += f"\n  {em.MONEY} Top buyer: @{top_buyer['name']} ({top_buyer['total']:.2f})"
-        else:
-            top_lines += f"\n  {em.MONEY} Top buyer: —"
-        if top_ref:
-            top_lines += f"\n  {em.USERS} Top referrer: @{top_ref['name']} ({top_ref['count']} refs)"
-        else:
-            top_lines += f"\n  {em.USERS} Top referrer: —"
+        top_buyer_str = f"@{top_buyer['name']} ({top_buyer['total']:.2f})" if top_buyer else "—"
+        top_ref_str = f"@{top_ref['name']} ({top_ref['count']} refs)" if top_ref else "—"
+
+        leaderboard_block = (
+            f"<blockquote>"
+            f"{em.FIRE} **Leaderboard (24h):**\n"
+            f"  {em.MONEY} Top buyer: {top_buyer_str}\n"
+            f"  {em.USERS} Top referrer: {top_ref_str}"
+            f"</blockquote>"
+        )
 
         await safe_edit(cq.message,
-            f"{em.STATS} **Statistics**\n\n"
-            f"<blockquote expandable>"
-            f"{em.USERS} Users: {s['users']}\n"
-            f"{em.PHONE} Numbers (active): {s['sessions']}\n"
-            f"{em.ONLINE} Connected: {active}\n"
-            f"{em.LINK} Assigned now: {assigned}\n"
-            f"{em.MAIL} OTPs forwarded: {s['otps']}\n"
-            f"{em.WALLET} Outstanding credits: {ext['outstanding_credits']}\n"
-            f"{em.PHONE} Inventory: {inv_line}"
-            f"{activity}"
-            f"{performance}"
-            f"{funnel}"
-            f"{revenue}"
-            f"{credits_dist}\n\n"
-            f"{em.CREDIT} **Payments by method:** {ps['total_payments']}{pay_lines}"
-            f"{top_lines}"
-            f"</blockquote>",
+            f"{em.STATS} **Statistics Overview**\n\n"
+            f"{overview_block}\n\n"
+            f"{activity_block}\n\n"
+            f"{performance_block}\n\n"
+            f"{revenue_block}\n\n"
+            f"{credits_dist_block}\n\n"
+            f"{leaderboard_block}",
             reply_markup=back_kb("admin_panel"),
         )
 
@@ -2042,6 +2061,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^get_number$|^pg_gn:\d+$"))
     @verified
     async def cb_get_number(_, cq: CallbackQuery):
+        await _answer_cq(cq)
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_gn:") else 0
 
         offer = await db.get_active_offer(cq.from_user.id)
@@ -2107,6 +2127,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^country:[A-Z]+$|^pg_cn:[A-Z]+:\d+$"))
     @verified
     async def cb_country(_, cq: CallbackQuery):
+        await _answer_cq(cq)
         if cq.data.startswith("pg_cn:"):
             parts = cq.data.split(":")
             cc, page = parts[1], int(parts[2])
@@ -2183,6 +2204,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^sel:"))
     @verified
     async def cb_select_number(_, cq: CallbackQuery):
+        await _answer_cq(cq)
         phone = cq.data.split(":", 1)[1]
 
         user = await db.get_user(cq.from_user.id)
@@ -2308,6 +2330,7 @@ def _register_handlers(app: Client):
         if req["user_id"] != cq.from_user.id and not await db.is_admin(cq.from_user.id):
             await cq.answer("Not your assignment.", show_alert=True)
             return
+        await _answer_cq(cq)
 
         otp_received = req.get("otp_received", False)
         price = req.get("price", 0)
@@ -2376,6 +2399,7 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^my_history$|^pg_mh:\d+$"))
     @verified
     async def cb_history(_, cq: CallbackQuery):
+        await _answer_cq(cq)
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_mh:") else 0
 
         otps = await db.get_user_otps(cq.from_user.id, limit=200)
