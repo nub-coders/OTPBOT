@@ -1932,6 +1932,7 @@ def _register_handlers(app: Client):
         ps = await db.get_payment_stats()
         ext = await db.get_extended_stats()
         rev = await db.get_revenue_stats()
+        cdist = await db.get_credit_distribution_stats()
         active = len(clients.active_clients)
         assigned = len(clients.active_requests)
         top_buyer = await db.top_buyer_24h()
@@ -1990,6 +1991,21 @@ def _register_handlers(app: Client):
             f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)"
         )
 
+        hholder = cdist.get("highest_holder")
+        if hholder:
+            highest_holder_line = f"\n  {em.OWNER} Highest holder: @{hholder['name']} (`{hholder['user_id']}`) — **{hholder['total']}** credits ({hholder['credits']} cr, {hholder['balance']} withdrawable)"
+        else:
+            highest_holder_line = f"\n  {em.OWNER} Highest holder: —"
+
+        credits_dist = (
+            f"\n\n{em.CREDIT} **Credits Distributed:**\n"
+            f"  {em.MONEY} Purchased: **{cdist['purchased']}** credits\n"
+            f"  {em.GIFT} Discount & Bonus: **{cdist['discount']}** credits\n"
+            f"  {em.DOLLAR} Withdrawable Balance: **{cdist['withdrawable']}** credits\n"
+            f"  {em.WALLET} Total Distributed: **{cdist['total_distributed']}** credits"
+            f"{highest_holder_line}"
+        )
+
         top_lines = f"\n\n{em.FIRE} **Leaderboard (24h):**"
         if top_buyer:
             top_lines += f"\n  {em.MONEY} Top buyer: @{top_buyer['name']} ({top_buyer['total']:.2f})"
@@ -2013,7 +2029,8 @@ def _register_handlers(app: Client):
             f"{activity}"
             f"{performance}"
             f"{funnel}"
-            f"{revenue}\n\n"
+            f"{revenue}"
+            f"{credits_dist}\n\n"
             f"{em.CREDIT} **Payments by method:** {ps['total_payments']}{pay_lines}"
             f"{top_lines}"
             f"</blockquote>",
@@ -3845,6 +3862,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
     # text on the active request so clients.py can send it at that point.
     purchase_alert = (
         f"{em.PHONE} **Number Purchased**\n\n"
+        f"{em.RECEIPT} Order ID: `{order_id}`\n"
         f"{em.USER} User: `{user_id}` (@{uname})\n"
         f"{em.PHONE} Number: `{phone}`\n"
         f"{flag} Country: {name}\n"
@@ -3986,7 +4004,7 @@ async def award_razorpay_payment(user_id: int, qr_id: str, plan_key: str,
         return False
 
     await db.add_credits(user_id, plan["credits"])
-    await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id)
+    await db.save_payment(user_id, "razorpay", plan_key, plan["amount_inr"] / 100, "INR", qr_id, credits=plan["credits"])
     await _check_referral_reward(user_id, plan["credits"])
     new_balance = await db.get_credits(user_id)
     buyer = await db.get_user(user_id)
@@ -4119,7 +4137,7 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
 
     pay_states.pop(user_id, None)
     await db.add_credits(user_id, plan["credits"])
-    await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
+    await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash, credits=plan["credits"])
     await _check_referral_reward(user_id, plan["credits"])
     new_balance = await db.get_credits(user_id)
     buyer = await db.get_user(user_id)

@@ -775,6 +775,78 @@ async def get_extended_stats():
     }
 
 
+async def get_credit_distribution_stats():
+    """Calculate total credits distributed (purchased, discount, withdrawable) and highest credit holder."""
+    from config import CREDIT_PLANS
+
+    # 1. Total Purchased Credits (sum from db.payments)
+    total_purchased = 0
+    async for p in db.payments.find():
+        if p.get("credits"):
+            total_purchased += int(p["credits"])
+        else:
+            plan_str = str(p.get("plan", "0"))
+            if plan_str in CREDIT_PLANS:
+                total_purchased += int(CREDIT_PLANS[plan_str]["credits"])
+            elif plan_str.isdigit():
+                total_purchased += int(plan_str)
+
+    # 2. Total Discount / Bonus Credits (referral earnings + active/used discount offer credits)
+    total_discount = 0
+    async for u in db.users.find():
+        ref_earned = u.get("referral_earned", 0) or 0
+        offer_dict = u.get("offer")
+        offer_cr = offer_dict.get("credits", 0) if isinstance(offer_dict, dict) else 0
+        total_discount += int(ref_earned + offer_cr)
+
+    # 3. Total Withdrawable Balance across all users
+    total_withdrawable = 0
+    async for doc in db.users.aggregate([{"$group": {"_id": None, "tot": {"$sum": "$balance"}}}]):
+        total_withdrawable = int(doc.get("tot", 0) or 0)
+
+    # 4. Total Non-withdrawable Credits held across all users
+    total_credits = 0
+    async for doc in db.users.aggregate([{"$group": {"_id": None, "tot": {"$sum": "$credits"}}}]):
+        total_credits = int(doc.get("tot", 0) or 0)
+
+    # 5. Highest Credit Holder (user with max credits + balance)
+    highest_holder = None
+    pipeline = [
+        {
+            "$project": {
+                "telegram_id": 1,
+                "username": 1,
+                "first_name": 1,
+                "credits": {"$ifNull": ["$credits", 0]},
+                "balance": {"$ifNull": ["$balance", 0]},
+                "total": {"$add": [{"$ifNull": ["$credits", 0]}, {"$ifNull": ["$balance", 0]}]},
+            }
+        },
+        {"$sort": {"total": -1}},
+        {"$limit": 1},
+    ]
+    async for u in db.users.aggregate(pipeline):
+        if u and u.get("total", 0) > 0:
+            name = u.get("username") or u.get("first_name") or str(u["telegram_id"])
+            highest_holder = {
+                "user_id": u["telegram_id"],
+                "name": name,
+                "credits": int(u.get("credits", 0)),
+                "balance": int(u.get("balance", 0)),
+                "total": int(u["total"]),
+            }
+
+    return {
+        "purchased": total_purchased,
+        "discount": total_discount,
+        "withdrawable": total_withdrawable,
+        "credits": total_credits,
+        "total_distributed": total_purchased + total_discount,
+        "highest_holder": highest_holder,
+    }
+
+
+
 async def ensure_indexes():
     """Create indexes used by the stats queries. Idempotent — safe to call on every startup."""
     await db.auth_failures.create_index("created_at")
@@ -844,7 +916,7 @@ async def get_revenue_stats():
 
 # ── Payments ──
 
-async def save_payment(user_id: int, method: str, plan: str, amount: float, currency: str, ref_id: str = ""):
+async def save_payment(user_id: int, method: str, plan: str, amount: float, currency: str, ref_id: str = "", credits: int = 0):
     doc = {
         "user_id": user_id,
         "method": method,
@@ -852,6 +924,7 @@ async def save_payment(user_id: int, method: str, plan: str, amount: float, curr
         "amount": float(amount),  # ensure BSON double, not Decimal128
         "currency": currency,
         "ref_id": ref_id,
+        "credits": credits,
         "created_at": datetime.now(timezone.utc),
     }
     await db.payments.insert_one(doc)
