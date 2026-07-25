@@ -20,31 +20,41 @@ async def recover_orphaned_assignments(bot):
     log.info("Found %d orphaned assignment(s), processing...", len(assignments))
     for a in assignments:
         phone = a["phone_number"]
-        user_id = a["user_id"]
-        price = a.get("price", 0)
-        otp_received = a.get("otp_received", False)
+        # Isolate each orphan: a DB error on one must not abort recovery of the
+        # rest, or the remaining users stay un-refunded and their assignments
+        # orphaned across the next restart too.
+        try:
+            user_id = a["user_id"]
+            price = a.get("price", 0)
+            otp_received = a.get("otp_received", False)
 
-        if otp_received:
-            await db.mark_session_sold(phone, user_id)
-            log.info("[%s] Orphan — OTP was received, marked sold", phone)
-        else:
-            if price > 0:
-                cd = a.get("credits_deducted", price)
-                bd = a.get("balance_deducted", 0)
-                await db.restore_purchase_funds(user_id, cd, bd)
-            restored = await db.restore_offer(user_id)
-            offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
-            log.info("[%s] Orphan — no OTP, refunded %d credits to user %d", phone, price, user_id)
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"⚠️ **Bot restarted** — your session for `{phone}` was interrupted.\n\n"
-                    f"💰 **{price} credits** have been refunded.{offer_line}",
-                )
-            except Exception:
-                pass
+            # Atomically claim the assignment before refunding — guards against
+            # double-refund if recovery runs twice (restart loop or concurrent startup).
+            if not await db.claim_orphan_assignment(phone):
+                log.info("[%s] Orphan already claimed by another recovery pass, skipping", phone)
+                continue
 
-        await db.remove_active_assignment(phone)
+            if otp_received:
+                await db.mark_session_sold(phone, user_id, a.get("price", 0), a.get("order_id"))
+                log.info("[%s] Orphan — OTP was received, marked sold", phone)
+            else:
+                if price > 0:
+                    cd = a.get("credits_deducted", price)
+                    bd = a.get("balance_deducted", 0)
+                    await db.restore_purchase_funds(user_id, cd, bd)
+                restored = await db.restore_offer(user_id)
+                offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
+                log.info("[%s] Orphan — no OTP, refunded %d credits to user %d", phone, price, user_id)
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ **Bot restarted** — your session for `{phone}` was interrupted.\n\n"
+                        f"💰 **{price} credits** have been refunded.{offer_line}",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error("[%s] Failed to recover orphaned assignment: %s", phone, e)
 
     log.info("Orphaned assignments recovered.")
 
@@ -99,6 +109,11 @@ async def refund_processor(bot):
             for refund in due:
                 user_id = refund["user_id"]
                 amount = refund["amount"]
+                # Atomic claim: only the caller that flips status to "done" credits.
+                # Guards against double-credit on restart or concurrent processors.
+                claimed = await db.claim_and_process_refund(refund["_id"])
+                if not claimed:
+                    continue
                 await db.add_credits(user_id, amount)
                 restored = await db.restore_offer(user_id, grace_minutes=15)
                 await db.mark_refund_done(refund["_id"])
@@ -184,6 +199,9 @@ async def main():
         await verification.start_server()
 
     await clients.validate_sessions()
+    cleared = await db.clear_stale_reservations()
+    if cleared:
+        log.info("Cleared %d stale session reservation(s) from a prior crash.", cleared)
     await recover_orphaned_assignments(bot)
     await recover_pending_payments(bot)
 

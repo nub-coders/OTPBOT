@@ -414,10 +414,7 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.INBOX} Seller Submissions", callback_data="seller_submissions", style=S.SUCCESS),
             InlineKeyboardButton(f"{em.DOLLAR} Withdrawals", callback_data="seller_withdrawals", style=S.DANGER),
         ],
-        [
-            InlineKeyboardButton(f"{em.MONEY} Add Credits", callback_data="add_credits", style=S.SUCCESS),
-            InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.PRIMARY),
-        ],
+        [InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.PRIMARY)],
         [InlineKeyboardButton(f"{em.BROADCAST} Broadcast", callback_data="broadcast_help", style=S.PRIMARY)],
         [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DANGER)],
     ])
@@ -888,7 +885,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "addcred", "removecred", "broadcast", "info",
+        "start", "help", "cancel", "broadcast", "info",
     ]))
     async def on_text(_, message: Message):
         user_id = message.from_user.id
@@ -1353,6 +1350,7 @@ def _register_handlers(app: Client):
         sold_to = session.get("sold_to")
         sold_at = session.get("sold_at")
         sold_price = session.get("sold_price", 0)
+        order_id = session.get("order_id")
 
         buyer_line = ""
         if sold_to:
@@ -1370,9 +1368,12 @@ def _register_handlers(app: Client):
         age_line = f"{em.CALENDAR} **Account Year:** ~{acc_year}\n" if acc_year else ""
         email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
+        order_line = f"{em.RECEIPT} **Order ID:** `{order_id}`\n" if order_id else ""
+
         info = (
             f"{em.OFFLINE} **Sold Number**\n\n"
             f"<blockquote>"
+            f"{order_line}"
             f"{em.PHONE} **Number:** `{phone}`\n"
             f"{flag} **Country:** {name} ({cc})\n"
             f"{em.MONEY} **Price Paid:** {sold_price} credits\n"
@@ -1729,179 +1730,85 @@ def _register_handlers(app: Client):
             reply_markup=InlineKeyboardMarkup(page_btns),
         )
 
-    # ── Credits ──
-
-    @app.on_callback_query(filters.regex("^add_credits$"))
-    @verified
-    async def cb_add_credits(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
-            return
-
-        await safe_edit(cq.message,
-            f"{em.MONEY} **Add Credits**\n\n"
-            "Use the command:\n"
-            "`/addcred <userid> <credits>`\n\n"
-            "**Example:**\n"
-            "`/addcred 123456789 50`\n\n"
-            "You can find user IDs in the **Users** section.",
-            reply_markup=back_kb("admin_panel"),
-        )
-
-    @app.on_message(filters.command("addcred") & filters.private)
-    @verified
-    async def cmd_addcred(_, message: Message):
-        if not await db.is_admin(message.from_user.id):
-            await message.reply(f"{em.BLOCKED} Admin only.")
-            return
-
-        parts = message.text.split()
-        if len(parts) != 3:
-            await message.reply(
-                "**Usage:** `/addcred <userid> <credits>`\n"
-                "**Example:** `/addcred 123456789 50`"
-            )
-            return
-
-        try:
-            target_id = int(parts[1])
-        except ValueError:
-            await message.reply(f"{em.ERROR} Invalid user ID.")
-            return
-
-        try:
-            amount = int(parts[2])
-            if amount <= 0:
-                await message.reply(f"{em.ERROR} Credits must be a positive number.")
-                return
-        except ValueError:
-            await message.reply(f"{em.ERROR} Invalid credits amount.")
-            return
-
-        target = await db.get_user(target_id)
-        if not target:
-            await message.reply(f"{em.ERROR} User `{target_id}` not found.")
-            return
-
-        await db.add_credits(target_id, amount)
-        new_balance = await db.get_credits(target_id)
-        name = target.get("first_name") or target.get("username") or str(target_id)
-
-        await alert(app,
-            f"{em.OWNER} **Admin Added Credits**\n\n"
-            f"{em.SHIELD} Admin: `{message.from_user.id}`\n"
-            f"{em.USER} Target: `{target_id}` ({name})\n"
-            f"{em.ADD} Credits: +{amount}\n"
-            f"{em.MONEY} New balance: {new_balance}"
-        )
-
-        await message.reply(
-            f"{em.SUCCESS} **Credits added!**\n\n"
-            f"{em.USER} User: **{name}**\n"
-            f"{em.ADD} Added: **{amount}**\n"
-            f"{em.MONEY} New balance: **{new_balance}**",
-        )
-
-        try:
-            await bot.send_message(
-                target_id,
-                f"{em.MONEY} **Credits added!**\n\n"
-                f"{em.ADD} {amount} credits added to your account.\n"
-                f"{em.MONEY} New balance: **{new_balance}**",
-            )
-        except Exception:
-            pass
-
-    @app.on_message(filters.command("removecred") & filters.private)
-    @verified
-    async def cmd_removecred(_, message: Message):
-        if not await db.is_admin(message.from_user.id):
-            await message.reply(f"{em.BLOCKED} Admin only.")
-            return
-
-        parts = message.text.split()
-        if len(parts) != 3:
-            await message.reply(
-                "**Usage:** `/removecred <userid> <credits>`\n"
-                "**Example:** `/removecred 123456789 50`"
-            )
-            return
-
-        try:
-            target_id = int(parts[1])
-        except ValueError:
-            await message.reply(f"{em.ERROR} Invalid user ID.")
-            return
-
-        try:
-            amount = int(parts[2])
-            if amount <= 0:
-                await message.reply(f"{em.ERROR} Credits must be a positive number.")
-                return
-        except ValueError:
-            await message.reply(f"{em.ERROR} Invalid credits amount.")
-            return
-
-        target = await db.get_user(target_id)
-        if not target:
-            await message.reply(f"{em.ERROR} User `{target_id}` not found.")
-            return
-
-        current = await db.get_credits(target_id)
-        if current < amount:
-            await message.reply(
-                f"{em.ERROR} User only has **{current}** credits. "
-                f"Cannot remove **{amount}**."
-            )
-            return
-
-        await db.deduct_credits(target_id, amount)
-        new_balance = await db.get_credits(target_id)
-        name = target.get("first_name") or target.get("username") or str(target_id)
-
-        await alert(app,
-            f"{em.OWNER} **Admin Removed Credits**\n\n"
-            f"{em.SHIELD} Admin: `{message.from_user.id}`\n"
-            f"{em.USER} Target: `{target_id}` ({name})\n"
-            f"{em.ERROR} Credits: -{amount}\n"
-            f"{em.MONEY} New balance: {new_balance}"
-        )
-
-        await message.reply(
-            f"{em.SUCCESS} **Credits removed!**\n\n"
-            f"{em.USER} User: **{name}**\n"
-            f"{em.ERROR} Removed: **{amount}**\n"
-            f"{em.MONEY} New balance: **{new_balance}**",
-        )
-
-        try:
-            await bot.send_message(
-                target_id,
-                f"{em.MONEY} **Credits removed**\n\n"
-                f"{em.ERROR} {amount} credits removed from your account.\n"
-                f"{em.MONEY} New balance: **{new_balance}**",
-            )
-        except Exception:
-            pass
-
     # ── Info ──
 
     @app.on_message(filters.command("info") & filters.private)
     @verified
     async def cmd_info(_, message: Message):
+        parts = message.text.split()
+        query = parts[1].strip() if len(parts) == 2 else ""
+
+        # Order lookup — any verified user can check their own order by ID.
+        if query.upper().startswith("ORD-"):
+            oid = query.upper()
+            is_admin = await db.is_admin(message.from_user.id)
+
+            # Live order: still assigned, no sale yet — offer a Release button for a speedy refund.
+            live = await db.get_active_assignment_by_order_id(oid)
+            if live and (is_admin or live.get("user_id") == message.from_user.id):
+                phone = live["phone_number"]
+                cc = (await db.get_session(phone) or {}).get("country_code", "XX")
+                flag = get_country_flag(cc)
+                cname = get_country_name(cc)
+                phone_disp = phone if is_admin else mask_phone(phone)
+                otp_done = live.get("otp_received", False)
+                status = "OTP received — sold on release" if otp_done else "Live — release for a refund"
+                kb = None
+                if not otp_done and is_admin:  # only admins can trigger the speedy release/refund
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.UNLOCK} Release & Refund", callback_data=f"release:{phone}", style=S.DANGER)],
+                    ])
+                await message.reply(
+                    f"{em.RECEIPT} **Order Details**\n\n"
+                    f"<blockquote>"
+                    f"{em.RECEIPT} Order ID: `{oid}`\n"
+                    f"{em.PHONE} Number: `{phone_disp}`\n"
+                    f"{flag} Country: {cname} ({cc})\n"
+                    f"{em.MONEY} Price: **{live.get('price', 0)}** credits\n"
+                    f"{em.TIMER} Status: {status}"
+                    f"</blockquote>",
+                    reply_markup=kb,
+                )
+                return
+
+            session = await db.get_session_by_order_id(oid)
+            if not session or (not is_admin and session.get("sold_to") != message.from_user.id):
+                await message.reply(f"{em.ERROR} Order `{oid}` not found.")
+                return
+
+            phone = session["phone_number"]
+            cc = session.get("country_code", "XX")
+            flag = get_country_flag(cc)
+            cname = get_country_name(cc)
+            sold_at = session.get("sold_at")
+            sold_str = sold_at.strftime("%Y-%m-%d %H:%M UTC") if sold_at else "—"
+            price = session.get("sold_price", 0)
+            phone_disp = phone if is_admin else mask_phone(phone)
+
+            await message.reply(
+                f"{em.RECEIPT} **Order Details**\n\n"
+                f"<blockquote>"
+                f"{em.RECEIPT} Order ID: `{session.get('order_id')}`\n"
+                f"{em.PHONE} Number: `{phone_disp}`\n"
+                f"{flag} Country: {cname} ({cc})\n"
+                f"{em.MONEY} Price: **{price}** credits\n"
+                f"{em.CALENDAR} Purchased: {sold_str}"
+                f"</blockquote>",
+            )
+            return
+
         if not await db.is_admin(message.from_user.id):
             await message.reply(f"{em.BLOCKED} Admin only.")
             return
 
-        parts = message.text.split()
         if len(parts) != 2:
             await message.reply(
-                "**Usage:** `/info <userid or @username>`\n"
-                "**Example:** `/info 123456789` or `/info @john`"
+                "**Usage:** `/info <userid or @username>` — user lookup (admin)\n"
+                "`/info <ORD-XXXXXXXX>` — order lookup\n"
+                "**Example:** `/info 123456789` or `/info ORD-1A2B3C4D`"
             )
             return
 
-        query = parts[1].strip()
         if query.startswith("@"):
             user = await db.db.users.find_one({"username": query.lstrip("@")})
         else:
@@ -2356,7 +2263,7 @@ def _register_handlers(app: Client):
                 f"{em.MONEY} **Top up to grab this account**\n\n"
                 f"{flag} `{mask_phone(phone)}` — **{price}** credits\n"
                 f"{offer_line}"
-                f"{em.CREDIT} Your balance: **{credits}** — short by **{shortfall}**\n\n"
+                f"{em.CREDIT} Your balance: **{total_funds}** — short by **{shortfall}**\n\n"
                 f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}** ({shortfall} credits)\n"
                 f"{em.SUCCESS} Once paid, `{mask_phone(phone)}` is assigned to you automatically.\n\n"
                 f"{em.TIMER} Valid for 15 minutes."
@@ -2389,6 +2296,7 @@ def _register_handlers(app: Client):
         price = req.get("price", 0)
         user_id = req["user_id"]
         no_sale = req.get("no_sale", False)
+        live_order_id = req.get("order_id")
 
         # Seller self-login into their own listing: never a sale, never a refund.
         if no_sale:
@@ -2409,13 +2317,29 @@ def _register_handlers(app: Client):
             )
             return
 
-        clients.release_number(phone)
+        # release_number atomically pops the in-memory request. Only the caller
+        # that actually wins the pop (non-None) may refund/mark-sold — this gates
+        # against double-clicks and release-vs-timeout double refunds.
+        released = clients.release_number(phone)
         await clients.stop_session(phone)
+        if released is None:
+            await safe_edit(cq.message,
+                f"{em.UNLOCK} `{mask_phone(phone)}` was already released.",
+                reply_markup=back_kb("main_menu"),
+            )
+            return
+
+        # Re-read from the popped request — it's the source of truth for the winner.
+        otp_received = released.get("otp_received", False)
+        price = released.get("price", 0)
+        user_id = released["user_id"]
+        live_order_id = released.get("order_id")
 
         if otp_received:
-            await db.mark_session_sold(phone, user_id, price)
+            order_id = await db.mark_session_sold(phone, user_id, price, live_order_id)
             await safe_edit(cq.message,
                 f"{em.UNLOCK} `{mask_phone(phone)}` released and marked as sold.\n\n"
+                f"{em.RECEIPT} Order ID: `{order_id}`\n"
                 f"{em.MONEY} **{price} credits** — no refund (OTP was received).",
                 reply_markup=back_kb("main_menu"),
             )
@@ -3128,8 +3052,6 @@ def _register_handlers(app: Client):
         admin_section = (
             f"\n\n{em.GEAR} **Admin Commands:**\n"
             "<blockquote expandable>"
-            "/addcred `<userid>` `<credits>` — Add credits to a user\n"
-            "/removecred `<userid>` `<credits>` — Remove credits from a user\n"
             "/info `<userid or @username>` — Look up user details\n"
             "/broadcast `<message>` — Broadcast to all users\n"
             "/broadcast `-name` `<message>` — Broadcast with your name"
@@ -3156,6 +3078,7 @@ def _register_handlers(app: Client):
             "<blockquote>"
             "/start — Main menu\n"
             "/help — This help page\n"
+            "/info `<ORD-XXXXXXXX>` — Check an order's details\n"
             "/cancel — Cancel current operation"
             "</blockquote>"
             f"{admin_section}"
@@ -3779,6 +3702,16 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
             reply_markup=back_kb("get_number"))
         return False
 
+    # Atomically claim the number before charging. Two buyers hitting the same
+    # number in the same tick both pass the checks above; only one wins this flip,
+    # so only one deducts funds. We restore 'active' on any abort or right after
+    # assignment (the in-memory active_requests gate takes over from there).
+    if not await db.reserve_session(phone):
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.OFFLINE} `{mask_phone(phone)}` was just taken by someone else.",
+            reply_markup=back_kb("get_number"))
+        return False
+
     cc = session.get("country_code", "XX")
     if not cc or cc == "XX":
         detected_cc, _, _ = detect_country(phone)
@@ -3786,6 +3719,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
             cc = detected_cc
     base_price = await db.get_session_price(session)
     if base_price is None:
+        await db.unreserve_session(phone)
         await _send_or_edit(user_id, edit_msg,
             f"{em.ERROR} This number is not configured for sale.",
             reply_markup=back_kb("get_number"))
@@ -3802,6 +3736,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
 
     if credits < price:
         # An offer may have expired between top-up and payment, raising the price.
+        await db.unreserve_session(phone)
         await _send_or_edit(user_id, edit_msg,
             f"{em.ERROR} You need {price} credits but have {credits}. "
             f"Your top-up was added to your balance — buy more credits or pick another number.",
@@ -3878,6 +3813,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         ok, credits_deducted, balance_deducted = await db.deduct_funds_for_purchase(user_id, price)
         if not ok:
             await clients.stop_session(phone)
+            await db.unreserve_session(phone)
             await _send_or_edit(user_id, edit_msg,
                 f"{em.ERROR} Could not deduct funds. Please try again or contact support.",
                 reply_markup=back_kb("main_menu"))
@@ -3887,7 +3823,11 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
     if offer:
         await db.consume_offer(user_id)
 
-    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted)
+    order_id = db.new_order_id()
+    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id)
+    # Assignment done — the in-memory active_requests gate now blocks other buyers,
+    # so return the DB status to 'active' (release/timeout/sold paths expect it).
+    await db.unreserve_session(phone)
 
     uname = user.get("username") or user.get("first_name") or str(user_id)
     flag = get_country_flag(cc)
@@ -3930,6 +3870,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         price_line = f"{em.MONEY} Price: **{price}** credits (deducted)\n"
     await _send_or_edit(user_id, edit_msg,
         f"{em.SUCCESS} **Account purchased!**\n\n"
+        f"{em.RECEIPT} Order ID: `{order_id}`\n"
         f"{flag} {name}\n"
         f"{em.PHONE} `{phone}`\n"
         f"{price_line}"
@@ -4030,9 +3971,15 @@ async def award_razorpay_payment(user_id: int, qr_id: str, plan_key: str,
     number is assigned automatically after crediting. Returns True if this call
     was the one that flipped the pending payment to done.
     """
-    plan = get_credit_plan(plan_key)
+    # Derive the plan from the STORED pending payment, never the caller-supplied
+    # plan_key — the callback data that carries plan_key is client-controlled, so
+    # the credited amount must come from what we persisted at QR-creation time.
+    pending = await db.get_pending_payment(qr_id)
+    authoritative_key = pending.get("plan_key") if pending else plan_key
+    plan = get_credit_plan(authoritative_key)
     if not plan:
         return False
+    plan_key = authoritative_key
     # Atomic flip guarantees credits are granted once even if the live poller and
     # the restart-recovery processor both observe the payment.
     if not await db.mark_pending_payment_done(qr_id):
@@ -4159,8 +4106,18 @@ async def _handle_tx_hash(message: Message, text: str, pstate: dict):
         )
         return
 
+    # Atomically claim the tx BEFORE crediting — a concurrent/duplicate send of
+    # the same hash loses the claim and must not be credited again.
+    if not await db.claim_tx(tx_hash, user_id, plan_key):
+        pay_states.pop(user_id, None)
+        support = " | ".join(SUPPORT_HANDLES)
+        await safe_edit(status_msg,
+            f"{em.ERROR} This TX hash has already been used.\n\n"
+            f"If you believe this is a mistake, contact support:\n{support}",
+        )
+        return
+
     pay_states.pop(user_id, None)
-    await db.mark_tx_used(tx_hash, user_id, plan_key)
     await db.add_credits(user_id, plan["credits"])
     await db.save_payment(user_id, "crypto_usdt", plan_key, pstate["amount_usdt"], "USDT", tx_hash)
     await _check_referral_reward(user_id, plan["credits"])

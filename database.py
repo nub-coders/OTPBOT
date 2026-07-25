@@ -1,4 +1,5 @@
 import motor.motor_asyncio
+import uuid
 from datetime import datetime, timezone, timedelta
 from pymongo.errors import DuplicateKeyError
 from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
@@ -106,14 +107,6 @@ async def add_credits(telegram_id: int, amount: int):
         {"telegram_id": telegram_id},
         {"$inc": {"credits": amount}},
     )
-
-
-async def deduct_credits(telegram_id: int, amount: int) -> bool:
-    result = await db.users.update_one(
-        {"telegram_id": telegram_id, "credits": {"$gte": amount}},
-        {"$inc": {"credits": -amount}},
-    )
-    return result.modified_count > 0
 
 
 async def get_balance(telegram_id: int) -> int:
@@ -377,7 +370,12 @@ async def remove_session(phone_number: str):
     )
 
 
-async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> dict | None:
+def new_order_id() -> str:
+    return "ORD-" + uuid.uuid4().hex[:8].upper()  # ponytail: uuid4 collision odds are negligible
+
+
+async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0, order_id: str | None = None) -> str:
+    order_id = order_id or new_order_id()  # reuse the id from the live order if we have it
     await db.sessions.update_one(
         {"phone_number": phone_number},
         {"$set": {
@@ -385,28 +383,39 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> 
             "sold_to": sold_to,
             "sold_at": datetime.now(timezone.utc),
             "sold_price": price,
+            "order_id": order_id,
         }},
     )
     listing = await db.sell_listings.find_one({"phone_number": phone_number})
     if listing and listing.get("status") in ("active", "pending_price"):
-        # Atomically flip to sold AND claim the payout in one guarded write, so a
-        # concurrent/duplicate sale can never credit the seller twice.
         payout = listing.get("payout_credits", 0)
-        claimed = await db.sell_listings.find_one_and_update(
-            {"_id": listing["_id"], "payout_credited": {"$ne": True}},
-            {"$set": {
-                "status": "sold",
-                "buyer_id": sold_to,
-                "sale_price": price,
-                "sold_at": datetime.now(timezone.utc),
-                "payout_credited": True,
-            }},
-            return_document=True,
-        )
-        if claimed and listing.get("seller_id") and payout > 0:
-            # Seller is paid ONLY now — on a real buyer purchase.
-            seller_id = listing["seller_id"]
-            await add_seller_earning(seller_id, payout)
+        seller_id = listing.get("seller_id")
+        # The guard flip (sell_listings) and the seller credit (users) touch two
+        # collections; a plain two-write sequence has a crash window that leaves the
+        # seller either unpaid or double-paid. Wrap both in ONE transaction so they
+        # commit together or not at all. Atlas replica set supports this.
+        paid = False
+        async with await client.start_session() as s:
+            async with s.start_transaction():
+                claimed = await db.sell_listings.find_one_and_update(
+                    {"_id": listing["_id"], "payout_credited": {"$ne": True}},
+                    {"$set": {
+                        "status": "sold",
+                        "buyer_id": sold_to,
+                        "sale_price": price,
+                        "sold_at": datetime.now(timezone.utc),
+                        "payout_credited": True,
+                    }},
+                    session=s,
+                )
+                if claimed and seller_id and payout > 0:
+                    await db.users.update_one(
+                        {"telegram_id": seller_id},
+                        {"$inc": {"seller_earned_total": payout, "balance": payout}},
+                        session=s,
+                    )
+                    paid = True
+        if paid:
             # Notify the seller that their account was just purchased.
             import clients as _clients
             from utils import mask_phone as _mask
@@ -420,8 +429,11 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0) -> 
                     )
                 except Exception:
                     pass
-        return {"seller_id": listing["seller_id"], "payout": payout, "phone_number": phone_number}
-    return None
+    return order_id
+
+
+async def get_session_by_order_id(order_id: str):
+    return await db.sessions.find_one({"order_id": order_id})
 
 
 async def get_sold_sessions():
@@ -474,6 +486,36 @@ async def set_session_category(phone_number: str, country_code: str = None,
         )
 
 
+async def reserve_session(phone_number: str) -> bool:
+    """Atomically flip an active session to 'reserved'. Returns True only for the
+    caller that won the flip — concurrent buyers of the same number get False, so
+    only one can proceed to deduct funds and assign."""
+    result = await db.sessions.update_one(
+        {"phone_number": phone_number, "status": "active"},
+        {"$set": {"status": "reserved"}},
+    )
+    return result.modified_count > 0
+
+
+async def unreserve_session(phone_number: str) -> None:
+    """Release a reservation back to 'active' (purchase aborted before assignment)."""
+    await db.sessions.update_one(
+        {"phone_number": phone_number, "status": "reserved"},
+        {"$set": {"status": "active"}},
+    )
+
+
+async def clear_stale_reservations() -> int:
+    """Reset any sessions stuck in 'reserved' back to 'active'. A reservation is a
+    short in-flight lock; if the process died mid-purchase it can leave one behind,
+    making the number permanently unbuyable. Called once at startup."""
+    result = await db.sessions.update_many(
+        {"status": "reserved"},
+        {"$set": {"status": "active"}},
+    )
+    return result.modified_count
+
+
 async def set_session_status(phone_number: str, status: str, error: str = ""):
     if error:
         await db.sessions.update_one(
@@ -511,7 +553,7 @@ async def get_user_otps(telegram_id: int, limit: int = 100):
 
 # ── Active Assignments ──
 
-async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int):
+async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int, order_id: str | None = None):
     doc = {
         "phone_number": phone_number,
         "user_id": user_id,
@@ -519,6 +561,7 @@ async def save_active_assignment(phone_number: str, user_id: int, price: int, ti
         "otp_received": False,
         "assigned_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=timeout),
+        "order_id": order_id,
     }
     await db.active_assignments.update_one(
         {"phone_number": phone_number},
@@ -538,8 +581,20 @@ async def remove_active_assignment(phone_number: str):
     await db.active_assignments.delete_one({"phone_number": phone_number})
 
 
+async def claim_orphan_assignment(phone_number: str) -> bool:
+    """Atomically delete (claim) an orphaned assignment. Returns True only for the
+    caller that actually removed it, so orphan recovery can refund exactly once
+    even if it retries or two recovery passes race."""
+    result = await db.active_assignments.delete_one({"phone_number": phone_number})
+    return result.deleted_count > 0
+
+
 async def get_all_active_assignments():
     return await db.active_assignments.find().to_list(None)
+
+
+async def get_active_assignment_by_order_id(order_id: str):
+    return await db.active_assignments.find_one({"order_id": order_id})
 
 
 # ── Pending Payments ──
@@ -613,11 +668,15 @@ async def get_due_refunds():
     }).to_list(None)
 
 
-async def mark_refund_done(refund_id):
-    await db.pending_refunds.update_one(
-        {"_id": refund_id},
+async def claim_and_process_refund(refund_id) -> dict | None:
+    """Atomically claim a pending refund. Returns the doc if this caller won the
+    claim; returns None if already processed (concurrent processor or restart)."""
+    result = await db.pending_refunds.find_one_and_update(
+        {"_id": refund_id, "status": "pending"},
         {"$set": {"status": "done", "processed_at": datetime.now(timezone.utc)}},
+        return_document=False,
     )
+    return result
 
 
 # ── Stats ──
@@ -742,6 +801,9 @@ async def ensure_indexes():
         unique=True,
         name="uniq_seller_phone_blacklist",
     )
+    # Crypto deposits: one credit per tx hash. Unique index makes claim_tx's
+    # insert the atomic gate against double-credit races.
+    await db.used_tx.create_index("tx_hash", unique=True, name="uniq_used_tx")
 
 
 async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
@@ -808,12 +870,20 @@ async def is_tx_used(tx_hash: str) -> bool:
     return await db.used_tx.find_one({"tx_hash": tx_hash}) is not None
 
 
-async def mark_tx_used(tx_hash: str, user_id: int, plan: str):
-    await db.used_tx.update_one(
-        {"tx_hash": tx_hash},
-        {"$set": {"user_id": user_id, "plan": plan, "ts": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
+async def claim_tx(tx_hash: str, user_id: int, plan: str) -> bool:
+    """Atomically claim a tx hash. Returns True only for the caller that won the
+    claim; concurrent/duplicate sends get False. Backed by a unique index on
+    tx_hash (see ensure_indexes) so the insert is the atomic gate."""
+    try:
+        await db.used_tx.insert_one({
+            "tx_hash": tx_hash,
+            "user_id": user_id,
+            "plan": plan,
+            "ts": datetime.now(timezone.utc),
+        })
+        return True
+    except DuplicateKeyError:
+        return False
 
 
 # ── Category Pricing ──
@@ -1082,14 +1152,6 @@ async def check_and_activate_pending_listings(country_code: str, year: int | Non
 
 
 # ── Seller Earnings ──
-
-async def add_seller_earning(seller_id: int, amount: int):
-    """Credit seller earnings into their withdrawable seller balance."""
-    await db.users.update_one(
-        {"telegram_id": seller_id},
-        {"$inc": {"seller_earned_total": amount, "balance": amount}},
-    )
-
 
 async def get_seller_stats(seller_id: int) -> dict:
     """Return seller earning totals, withdrawable balance, and listing counts."""
