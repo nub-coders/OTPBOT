@@ -930,6 +930,10 @@ async def save_payment(user_id: int, method: str, plan: str, amount: float, curr
     await db.payments.insert_one(doc)
 
 
+async def get_user_payments(user_id: int, limit: int = 5):
+    return await db.payments.find({"user_id": user_id}).sort("created_at", -1).to_list(limit)
+
+
 async def get_payment_stats():
     total = await db.payments.count_documents({})
     pipeline = [{"$group": {"_id": "$method", "count": {"$sum": 1}, "total": {"$sum": "$amount"}}}]

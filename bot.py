@@ -1846,6 +1846,27 @@ def _register_handlers(app: Client):
 
         ref_line = f"\n{em.LINK} Referred by: `{referred_by}`" if referred_by else ""
 
+        # Recent payments — most recent first.
+        payments = await db.get_user_payments(uid, limit=5)
+        if payments:
+            pay_lines = []
+            for p in payments:
+                p_at = p.get("created_at")
+                p_str = p_at.strftime("%Y-%m-%d %H:%M UTC") if p_at else "—"
+                amount = p.get("amount", 0)
+                currency = p.get("currency", "")
+                method = p.get("method", "—")
+                p_credits = p.get("credits", 0)
+                pay_lines.append(
+                    f"• **{amount} {currency}** ({method}) → **{p_credits}** credits — {p_str}"
+                )
+            payments_block = (
+                f"\n\n{em.RECEIPT} **Recent Payments** ({len(payments)})\n"
+                f"<blockquote>" + "\n".join(pay_lines) + "</blockquote>"
+            )
+        else:
+            payments_block = f"\n\n{em.RECEIPT} **Recent Payments:** none"
+
         await message.reply(
             f"{role_icon} **User Info**\n\n"
             f"<blockquote>"
@@ -1857,7 +1878,8 @@ def _register_handlers(app: Client):
             f"{em.MONEY} Credits: **{credits}**\n"
             f"{em.CALENDAR} Joined: {created_str}\n"
             f"{em.GIFT} Referrals: **{ref_count}** | Earned: **{ref_earned}**{ref_line}"
-            f"</blockquote>",
+            f"</blockquote>"
+            f"{payments_block}",
         )
 
     # ── Broadcast ──
