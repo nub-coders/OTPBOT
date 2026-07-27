@@ -4478,6 +4478,16 @@ async def _handle_sell_password(message: Message, password: str):
 async def _complete_sell_submission(seller_id: int, status_msg, phone: str, session_string: str, password: str, cc: str, acc_id: int | None, acc_year: int | None, has_email: bool, is_peer_flood: bool, sess_cnt: int = 1, sess_info: str = ""):
     sell_states.pop(seller_id, None)
 
+    if acc_id is not None and acc_id == seller_id:
+        await safe_edit(status_msg,
+            f"{em.ERROR} **Selling Request Cancelled!**\n\n"
+            f"You're trying to sell the **same Telegram account** you're using this bot with.\n\n"
+            f"Selling it would log you out and you'd lose access here. "
+            f"Please submit a **different** account.",
+            reply_markup=back_kb("sell_account"),
+        )
+        return
+
     if is_peer_flood:
         await db.blacklist_seller_phone(phone, seller_id, reason="peer_flood")
         await safe_edit(status_msg,
