@@ -440,6 +440,36 @@ async def get_sold_sessions():
     return await db.sessions.find({"status": "sold"}).sort("sold_at", -1).to_list(None)
 
 
+async def get_user_recent_sold_sessions(telegram_id: int, hours: int = 24) -> list[dict]:
+    """Return all sessions sold to `telegram_id` within the last `hours` hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return await db.sessions.find({
+        "status": "sold",
+        "sold_to": telegram_id,
+        "sold_at": {"$gte": cutoff},
+    }).sort("sold_at", -1).to_list(None)
+
+
+async def get_user_sold_history(telegram_id: int, limit: int = 200) -> list[dict]:
+    """Return all sessions sold to `telegram_id` sorted by sold_at desc."""
+    s1 = await db.sessions.find({"status": "sold", "sold_to": telegram_id}).sort("sold_at", -1).limit(limit).to_list(limit)
+    s2 = await db.removed_sessions.find({"status": "sold", "sold_to": telegram_id}).sort("sold_at", -1).limit(limit).to_list(limit)
+    combined = sorted(
+        s1 + s2,
+        key=lambda x: x.get("sold_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
+    seen = set()
+    unique = []
+    for s in combined:
+        ph = s.get("phone_number")
+        if ph not in seen:
+            seen.add(ph)
+            unique.append(s)
+    return unique[:limit]
+
+
+
 async def has_recent_purchase(telegram_id: int, days: int) -> bool:
     """Return whether the user bought any number within the last `days` days."""
     if days <= 0:

@@ -79,9 +79,6 @@ async def _on_new_message(client: Client, message):
     if code:
         session = await db.get_session(phone)
 
-        await db.save_otp(phone, code, text, sender_name, user_id)
-        log.info("[%s] OTP '%s' saved to DB", phone, code)
-
         if bot_app:
             credits_left = await db.get_credits(user_id)
             credit_line = f"\n💰 Credits left: {credits_left}"
@@ -374,6 +371,9 @@ async def _fetch_email_otp() -> str | None:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"x-api-key": INBOX_API_KEY}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    log.warning("Failed to poll inbox API: HTTP status %s", resp.status)
+                    return None
                 data = await resp.json(content_type=None)
         if isinstance(data, list):
             items = data

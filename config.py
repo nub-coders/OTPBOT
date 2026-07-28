@@ -42,7 +42,7 @@ REFERRAL_VERIFY_BONUS = int(os.getenv("REFERRAL_VERIFY_BONUS", "1"))
 # account already has a login email, switch it to our own so the seller can't
 # recover the account. The email OTP is read from our inbox API.
 NEW_LOGIN_EMAIL = os.getenv("NEW_LOGIN_EMAIL", "")
-INBOX_API_BASE = os.getenv("INBOX_API_BASE", "https://nubcoders.com/api/emails/inbox-api")
+INBOX_API_BASE = os.getenv("INBOX_API_BASE", "https://mails.nubcoders.com/api/emails/inbox-api")
 INBOX_API_KEY = os.getenv("INBOX_API_KEY", "")  # secret — env only, never hardcode
 
 # ── Seller Marketplace ──

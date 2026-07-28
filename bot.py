@@ -2424,26 +2424,45 @@ def _register_handlers(app: Client):
         await _answer_cq(cq)
         page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_mh:") else 0
 
-        otps = await db.get_user_otps(cq.from_user.id, limit=200)
-        if not otps:
+        recent_sold = await db.get_user_recent_sold_sessions(cq.from_user.id, hours=24)
+        purchases = await db.get_user_sold_history(cq.from_user.id, limit=200)
+
+        if not recent_sold and not purchases:
             await safe_edit(cq.message,
-                f"{em.LOGS} **No OTP history yet.**\n\n"
-                f"Your login OTPs will appear here after you buy an account.",
+                f"{em.LOGS} **No purchase history yet.**\n\n"
+                f"Your purchased numbers will appear here after you buy an account.",
                 reply_markup=back_kb("main_menu"),
             )
             return
 
+        all_buttons = []
+        if recent_sold:
+            for s in recent_sold:
+                ph = s["phone_number"]
+                all_buttons.append([
+                    InlineKeyboardButton(
+                        f"{em.PHONE} {ph} (Get OTP)",
+                        callback_data=f"hnum:{ph}",
+                        style=S.SUCCESS,
+                    )
+                ])
+
         all_lines = []
-        for o in otps:
-            ts = o["created_at"].strftime("%m/%d %H:%M")
+        for p in purchases:
+            price = p.get("sold_price") or p.get("price") or 0
+            ph = p.get("phone_number", "Unknown")
+            service = p.get("app") or p.get("service") or "Telegram"
+            sold_at = p.get("sold_at")
+            ts = sold_at.strftime("%m/%d %H:%M") if sold_at else ""
+            ts_str = f" — {ts}" if ts else ""
             all_lines.append(
-                f"`{o['code']}` — {o['phone_number']} — {o['sender']} — {ts}"
+                f"`{price} cr` — {ph} — {service}{ts_str}"
             )
 
         start = page * PAGE_SIZE
         end = start + PAGE_SIZE
         page_lines = all_lines[start:end]
-        total_pages = (len(all_lines) + PAGE_SIZE - 1) // PAGE_SIZE
+        total_pages = (len(all_lines) + PAGE_SIZE - 1) // PAGE_SIZE if all_lines else 1
 
         nav = []
         if page > 0:
@@ -2457,11 +2476,86 @@ def _register_handlers(app: Client):
         footer.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)])
         page_label = f"\n\n{em.LIST} Page {page + 1}/{total_pages}" if total_pages > 1 else ""
 
+        body_parts = []
+        if recent_sold:
+            body_parts.append(f"{em.PHONE} **Purchased Numbers (< 24 Hours):**\nTap a number button below to start session & receive OTP.\n")
+        if page_lines:
+            body_parts.append(f"{em.LOGS} **Purchase History:**\n<blockquote expandable>\n" + "\n".join(page_lines) + "\n</blockquote>" + page_label)
+        elif not recent_sold:
+            body_parts.append(f"{em.LOGS} **No purchase history yet.**")
+
         await safe_edit(cq.message,
-            f"{em.LOGS} **Recent OTPs:**\n\n<blockquote expandable>"
-            + "\n".join(page_lines)
-            + "</blockquote>" + page_label,
-            reply_markup=InlineKeyboardMarkup(footer),
+            "\n".join(body_parts),
+            reply_markup=InlineKeyboardMarkup(all_buttons + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^hnum:"))
+    @verified
+    async def cb_history_number(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        user_id = cq.from_user.id
+
+        session = await db.get_session(phone)
+        if not session:
+            await cq.answer(f"{em.ERROR} Session not found.", show_alert=True)
+            return
+
+        if session.get("sold_to") != user_id or session.get("status") != "sold":
+            await cq.answer(f"{em.ERROR} You do not own this number.", show_alert=True)
+            return
+
+        sold_at = session.get("sold_at")
+        if sold_at:
+            if sold_at.tzinfo is None:
+                sold_at = sold_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - sold_at > timedelta(hours=24):
+                await cq.answer(f"{em.ERROR} 24-hour window to get OTP has expired for this number.", show_alert=True)
+                return
+
+        existing = clients.get_request_user(phone)
+        if existing and existing != user_id:
+            await cq.answer(f"{em.OFFLINE} Number is currently in an active session.", show_alert=True)
+            return
+
+        await safe_edit(cq.message, f"{em.LOADING} Connecting session for `{phone}`...")
+
+        try:
+            await clients.start_session(phone, session["session_string"])
+        except Exception as e:
+            log.error("Failed to start session %s from history: %s", phone, e)
+            await safe_edit(cq.message,
+                f"{em.ERROR} Failed to connect `{phone}`: `{str(e)[:200]}`",
+                reply_markup=back_kb("my_history"),
+            )
+            return
+
+        # Do not check 2FA password here as requested ("this will not check password").
+        # Password will be included automatically when OTP arrives via clients._on_new_message.
+        order_id = session.get("order_id") or db.new_order_id()
+        clients.assign_number(
+            phone,
+            user_id,
+            timeout=OTP_TIMEOUT,
+            price=0,
+            credits_deducted=0,
+            balance_deducted=0,
+            order_id=order_id,
+        )
+
+        pwd_hint = f"\n🔐 2FA Password will be shown after OTP comes." if session.get("password") else ""
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.CANCELLED} Release / Stop", callback_data=f"release:{phone}", style=S.DANGER)],
+            [InlineKeyboardButton(f"{em.BACK} Back to History", callback_data="my_history", style=S.DEFAULT)],
+        ])
+
+        await safe_edit(cq.message,
+            f"{em.SUCCESS} **Session Started!**\n\n"
+            f"📱 Number: `{phone}`\n"
+            f"⏳ Waiting for OTP... (Session active for {OTP_TIMEOUT // 60} min)\n"
+            f"{pwd_hint}\n\n"
+            f"Please request the OTP on Telegram now.",
+            reply_markup=buttons,
         )
 
     # ── Buy Credits ──
@@ -2471,6 +2565,26 @@ def _register_handlers(app: Client):
     async def cb_buy_credits(_, cq: CallbackQuery):
         auth_states.pop(cq.from_user.id, None)
         credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
+
+        payments = await db.get_user_payments(cq.from_user.id, limit=5)
+        payments_block = ""
+        if payments:
+            pay_lines = []
+            for p in payments:
+                p_at = p.get("created_at")
+                p_str = p_at.strftime("%m/%d %H:%M") if p_at else "—"
+                amount = p.get("amount", 0)
+                currency = p.get("currency", "")
+                method = p.get("method", "—")
+                p_credits = p.get("credits", 0)
+                pay_lines.append(
+                    f"• **{amount} {currency}** ({method}) → **{p_credits}** credits — {p_str}"
+                )
+            payments_block = (
+                f"\n\n{em.RECEIPT} **Recent Deposits:**\n"
+                f"<blockquote expandable>" + "\n".join(pay_lines) + "</blockquote>"
+            )
+
         buttons = [
             [
                 InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans", style=S.SUCCESS),
@@ -2482,7 +2596,7 @@ def _register_handlers(app: Client):
             f"{em.CREDIT} **Buy Credits**\n\n"
             f"{em.CREDIT} Credits: **{credits}** (purchase only)\n"
             f"{em.MONEY} Withdrawable Balance: **{balance}** credits (purchase & withdrawal)\n\n"
-            "Choose a payment method:",
+            f"Choose a payment method:{payments_block}",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -3940,6 +4054,8 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{price_line}"
         f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
         "The login OTP for this account will be forwarded to you here.\n\n"
+        "ℹ️ Your account will be with us for 24 hours and after that you can log us out.\n"
+        "In this time, you can get OTP again anytime under the History section.\n\n"
         f"{em.WARNING} On manual release, your credits will be locked for 1 hour.\n\n"
         f"{em.WARNING} Issues logging in? Contact support:\n{support}",
         reply_markup=InlineKeyboardMarkup([
