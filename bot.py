@@ -1846,6 +1846,72 @@ def _register_handlers(app: Client):
 
         ref_line = f"\n{em.LINK} Referred by: `{referred_by}`" if referred_by else ""
 
+        # Seller & Buyer Info
+        seller_info = await db.get_user_seller_details(uid)
+        buyer_info = await db.get_user_buyer_details(uid)
+
+        s_sold_cnt = seller_info["total_sold_count"]
+        s_listed_cnt = seller_info["total_listed_count"]
+        s_earned = seller_info["earned_total"]
+        s_balance = seller_info["balance"]
+
+        if s_sold_cnt > 0 or s_listed_cnt > 0 or s_earned > 0:
+            seller_lines = [
+                f"🏷 **Seller Info**",
+                f"• Total Numbers Sold: **{s_sold_cnt}**",
+                f"• Total Numbers Listed: **{s_listed_cnt}**",
+                f"• Total Earned: **{s_earned}** credits | Balance: **{s_balance}** credits",
+            ]
+            if seller_info["sold_numbers"]:
+                sold_items = []
+                for item in seller_info["sold_numbers"][:10]:
+                    ph = item["phone_number"]
+                    payout = item.get("payout", 0)
+                    sat = item.get("sold_at")
+                    sat_str = sat.strftime("%Y-%m-%d %H:%M") if sat else ""
+                    ts_str = f" ({sat_str})" if sat_str else ""
+                    sold_items.append(f"  • `{ph}` (+{payout} cr){ts_str}")
+                rem = len(seller_info["sold_numbers"]) - 10
+                if rem > 0:
+                    sold_items.append(f"  *...and {rem} more sold*")
+                seller_lines.append("📤 **Numbers Sold:**\n" + "\n".join(sold_items))
+
+            if seller_info["listed_numbers"]:
+                listed_items = []
+                for item in seller_info["listed_numbers"][:10]:
+                    ph = item["phone_number"]
+                    st = item.get("status", "active")
+                    listed_items.append(f"  • `{ph}` [{st}]")
+                rem = len(seller_info["listed_numbers"]) - 10
+                if rem > 0:
+                    listed_items.append(f"  *...and {rem} more listed*")
+                seller_lines.append("📋 **Numbers Listed:**\n" + "\n".join(listed_items))
+            seller_block = "\n\n" + "\n".join(seller_lines)
+        else:
+            seller_block = "\n\n🏷 **Seller Info:** None (0 sold / 0 listed)"
+
+        b_count = buyer_info["total_bought_count"]
+        if b_count > 0:
+            buyer_lines = [
+                f"🛍 **Buyer Info**",
+                f"• Total Numbers Bought: **{b_count}**",
+            ]
+            bought_items = []
+            for item in buyer_info["bought_numbers"][:10]:
+                ph = item["phone_number"]
+                pr = item.get("price", 0)
+                sat = item.get("sold_at")
+                sat_str = sat.strftime("%Y-%m-%d %H:%M") if sat else ""
+                ts_str = f" ({sat_str})" if sat_str else ""
+                bought_items.append(f"  • `{ph}` ({pr} cr){ts_str}")
+            rem = b_count - 10
+            if rem > 0:
+                bought_items.append(f"  *...and {rem} more bought*")
+            buyer_lines.append("📥 **Bought Numbers:**\n" + "\n".join(bought_items))
+            buyer_block = "\n\n" + "\n".join(buyer_lines)
+        else:
+            buyer_block = "\n\n🛍 **Buyer Info:** None (0 bought)"
+
         # Recent payments — most recent first.
         payments = await db.get_user_payments(uid, limit=5)
         if payments:
@@ -1879,6 +1945,8 @@ def _register_handlers(app: Client):
             f"{em.CALENDAR} Joined: {created_str}\n"
             f"{em.GIFT} Referrals: **{ref_count}** | Earned: **{ref_earned}**{ref_line}"
             f"</blockquote>"
+            f"{seller_block}"
+            f"{buyer_block}"
             f"{payments_block}",
         )
 
@@ -1963,6 +2031,7 @@ def _register_handlers(app: Client):
         ps = await db.get_payment_stats()
         ext = await db.get_extended_stats()
         rev = await db.get_revenue_stats()
+        wstats = await db.get_withdrawal_stats()
         cdist = await db.get_credit_distribution_stats()
         active = len(clients.active_clients)
         assigned = len(clients.active_requests)
@@ -2034,7 +2103,11 @@ def _register_handlers(app: Client):
             f"<blockquote>"
             f"{em.BANK} **Revenue (INR-equiv):**\n"
             f"  Last 24h: ₹{rev['24h']['inr']:.2f} ({rev['24h']['count']} txns)\n"
+            f"  This Month: ₹{rev['monthly']['inr']:.2f} ({rev['monthly']['count']} txns)\n"
             f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)\n\n"
+            f"{em.DOLLAR} **Withdrawals:**\n"
+            f"  This Month: **{wstats['monthly']['amount']}** credits ({wstats['monthly']['count']} reqs)\n"
+            f"  Total: **{wstats['all']['amount']}** credits ({wstats['all']['count']} reqs)\n\n"
             f"{em.CREDIT} **Payments by method ({ps['total_payments']}):**{pay_lines}"
             f"</blockquote>"
         )

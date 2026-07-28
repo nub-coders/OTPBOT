@@ -906,6 +906,8 @@ async def ensure_indexes():
     # Crypto deposits: one credit per tx hash. Unique index makes claim_tx's
     # insert the atomic gate against double-credit races.
     await db.used_tx.create_index("tx_hash", unique=True, name="uniq_used_tx")
+    await db.withdrawal_requests.create_index("created_at")
+    await db.payments.create_index("created_at")
 
 
 async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
@@ -920,8 +922,10 @@ async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", r
 
 
 async def get_revenue_stats():
-    """Revenue totals split by all-time and last 24h, in INR-equivalent."""
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    """Revenue totals split by all-time, monthly (resets on 1st of month), and last 24h, in INR-equivalent."""
+    now = datetime.now(timezone.utc)
+    since_24h = now - timedelta(hours=24)
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     async def revenue(match):
         pipeline = [
@@ -940,7 +944,45 @@ async def get_revenue_stats():
 
     return {
         "all": await revenue({}),
-        "24h": await revenue({"created_at": {"$gte": since}}),
+        "monthly": await revenue({"created_at": {"$gte": start_of_month}}),
+        "24h": await revenue({"created_at": {"$gte": since_24h}}),
+    }
+
+
+async def get_withdrawal_stats():
+    """Withdrawal totals (credits and count) split by all-time and current month (resets on 1st of month)."""
+    now = datetime.now(timezone.utc)
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    async def withdrawals(match):
+        pipeline = [
+            {"$match": match},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}, "total": {"$sum": "$amount"}}},
+        ]
+        done_count, done_amount = 0, 0
+        pending_count, pending_amount = 0, 0
+        async for doc in db.withdrawal_requests.aggregate(pipeline):
+            st = doc["_id"]
+            if st == "done":
+                done_count += doc["count"]
+                done_amount += int(doc["total"])
+            elif st == "pending":
+                pending_count += doc["count"]
+                pending_amount += int(doc["total"])
+        total_count = done_count + pending_count
+        total_amount = done_amount + pending_amount
+        return {
+            "done_count": done_count,
+            "done_amount": done_amount,
+            "pending_count": pending_count,
+            "pending_amount": pending_amount,
+            "count": total_count,
+            "amount": total_amount,
+        }
+
+    return {
+        "all": await withdrawals({"status": {"$ne": "rejected"}}),
+        "monthly": await withdrawals({"status": {"$ne": "rejected"}, "created_at": {"$gte": start_of_month}}),
     }
 
 
@@ -1276,6 +1318,118 @@ async def get_seller_stats(seller_id: int) -> dict:
         "earned_total": earned_total,
         "balance": balance,
         "listings": counts,
+    }
+
+
+async def get_user_seller_details(seller_id: int) -> dict:
+    """Return comprehensive seller details for a user ID: counts and number lists."""
+    listings = await db.sell_listings.find({"seller_id": seller_id}).sort("created_at", -1).to_list(None)
+    s_live = await db.sessions.find({"added_by": seller_id}).to_list(None)
+    s_rem = await db.removed_sessions.find({"added_by": seller_id}).to_list(None)
+
+    listed_map = {}
+    sold_map = {}
+
+    for l in listings:
+        ph = l.get("phone_number")
+        st = l.get("status")
+        if not ph:
+            continue
+        if st in ("active", "pending_price"):
+            listed_map[ph] = {
+                "phone_number": ph,
+                "status": st,
+                "created_at": l.get("created_at"),
+                "country_code": l.get("country_code", "XX"),
+            }
+        elif st == "sold":
+            sold_map[ph] = {
+                "phone_number": ph,
+                "payout": l.get("payout_credits", 0),
+                "sold_at": l.get("sold_at"),
+                "country_code": l.get("country_code", "XX"),
+            }
+
+    for s in (s_live + s_rem):
+        ph = s.get("phone_number")
+        st = s.get("status")
+        if not ph:
+            continue
+        if st in ("active", "pending_price") and ph not in listed_map and ph not in sold_map:
+            listed_map[ph] = {
+                "phone_number": ph,
+                "status": st,
+                "created_at": s.get("created_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+        elif st == "sold" and ph not in sold_map:
+            sold_map[ph] = {
+                "phone_number": ph,
+                "payout": s.get("sold_price", 0),
+                "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+
+    user = await get_user(seller_id)
+    earned_total = (user or {}).get("seller_earned_total", 0)
+    balance = (user or {}).get("balance", 0)
+
+    listed_list = sorted(
+        listed_map.values(),
+        key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
+    sold_list = sorted(
+        sold_map.values(),
+        key=lambda x: x.get("sold_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
+
+    return {
+        "total_listed_count": len(listed_list),
+        "total_sold_count": len(sold_list),
+        "earned_total": earned_total,
+        "balance": balance,
+        "listed_numbers": listed_list,
+        "sold_numbers": sold_list,
+    }
+
+
+async def get_user_buyer_details(buyer_id: int) -> dict:
+    """Return comprehensive buyer details for a user ID: counts and number lists."""
+    s1 = await db.sessions.find({"status": "sold", "sold_to": buyer_id}).sort("sold_at", -1).to_list(None)
+    s2 = await db.removed_sessions.find({"status": "sold", "sold_to": buyer_id}).sort("sold_at", -1).to_list(None)
+    sl = await db.sell_listings.find({"status": "sold", "buyer_id": buyer_id}).sort("sold_at", -1).to_list(None)
+
+    bought_map = {}
+    for s in (s1 + s2):
+        ph = s.get("phone_number")
+        if ph and ph not in bought_map:
+            bought_map[ph] = {
+                "phone_number": ph,
+                "price": s.get("sold_price") or s.get("price", 0),
+                "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+    for l in sl:
+        ph = l.get("phone_number")
+        if ph and ph not in bought_map:
+            bought_map[ph] = {
+                "phone_number": ph,
+                "price": l.get("sale_price", 0),
+                "sold_at": l.get("sold_at"),
+                "country_code": l.get("country_code", "XX"),
+            }
+
+    bought_list = sorted(
+        bought_map.values(),
+        key=lambda x: x.get("sold_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
+
+    return {
+        "total_bought_count": len(bought_list),
+        "bought_numbers": bought_list,
     }
 
 
