@@ -1090,13 +1090,14 @@ def _register_handlers(app: Client):
         else:
             for cat in cat_prices:
                 year = cat.get("year", 2025)
+                month = cat.get("month")
                 email = cat.get("email_added", False)
                 price = cat.get("price", 1)
                 email_str = "Yes" if email else "No"
                 
-                lines.append(f"{em.CALENDAR} Year Old: **{format_account_year(year)}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
+                lines.append(f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
                 buttons.append([InlineKeyboardButton(
-                    f"{em.EDIT} {format_account_year(year)} | Email: {email_str} — {price} cr",
+                    f"{em.EDIT} {format_account_year(year, month)} | Email: {email_str} — {price} cr",
                     callback_data=f"editcat:{cc}:{year}:{email}", style=S.DEFAULT,
                 )])
         
@@ -4000,13 +4001,14 @@ async def _handle_manual_country(message: Message, text: str):
         state["country_code"] = cc
         state["step"] = "confirm_country"
         year = state.get("account_year")
+        month = state.get("account_month")
         email_added = state.get("email_added", False)
         await message.reply(
             f"{em.GLOBE} Found: {flag} **{name}** ({cc})\n"
-            f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
             f"{em.MAIL} Email added: **{'Yes' if email_added else 'No'}**\n\n"
             f"Confirm this country for `{state['phone']}`?",
-            reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
+            reply_markup=_confirm_country_kb(flag, name, cc, year, month, pick=True),
         )
         return
 
@@ -4085,7 +4087,8 @@ async def _handle_edit_num_country(message: Message, text: str):
 
         session = await db.get_session(phone)
         year = session.get("account_year") if session else None
-        year_label = format_account_year(year)
+        month = session.get("account_month") if session else None
+        year_label = format_account_year(year, month)
         email = session.get("email_added", False) if session else False
         email_str = "Yes" if email else "No"
         price = await db.get_session_price(session) if session else 1
@@ -4146,13 +4149,14 @@ async def _handle_edit_num_set_price(message: Message, text: str):
 
     cc = session.get("country_code", "XX")
     year = session.get("account_year")
+    month = session.get("account_month")
     email = session.get("email_added", False)
 
     await db.set_category_price(cc, year, email, price)
 
     flag = get_country_flag(cc)
     name = get_country_name(cc)
-    year_label = format_account_year(year)
+    year_label = format_account_year(year, month)
     email_str = "Yes" if email else "No"
 
     await message.reply(
@@ -4356,7 +4360,8 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         req_info["purchase_alert"] = purchase_alert
     credit_line = f"\n{em.CREDIT} Credits: {credits}\n{em.MONEY} Withdrawable Balance: {balance}"
     acc_year = session.get("account_year")
-    age_line = f"\n{em.CALENDAR} Account created: ~{acc_year}" if acc_year else ""
+    acc_month = session.get("account_month")
+    age_line = f"\n{em.CALENDAR} Year Old: ~{format_account_year(acc_year, acc_month)}" if acc_year else ""
     email_added = session.get("email_added", False)
     email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
     support = " | ".join(SUPPORT_HANDLES)
@@ -4785,6 +4790,7 @@ async def _handle_set_new_category_price(message: Message, text: str):
 
     cc = state["pending_cc"]
     year = state.get("account_year")
+    month = state.get("account_month")
     email_added = state.get("email_added", False)
 
     await db.set_category_price(cc, year, email_added, price)
@@ -4797,8 +4803,8 @@ async def _handle_set_new_category_price(message: Message, text: str):
     await db.save_session(phone, state["session_string"], user_id,
                           password=state.get("password", ""), country_code=cc,
                           account_id=state.get("account_id"), account_year=year,
-                          email_added=email_added)
-    await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
+                          account_month=month, email_added=email_added)
+    await db.set_session_account_info(phone, state.get("account_id"), year, email_added, account_month=month)
     auth_states.pop(user_id, None)
 
     await alert(bot,
@@ -4806,7 +4812,7 @@ async def _handle_set_new_category_price(message: Message, text: str):
         f"{em.SHIELD} Admin: `{user_id}`\n"
         f"{em.PHONE} Number: `{phone}`\n"
         f"{flag} Country: {name}\n"
-        f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
+        f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
         f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
         f"{em.MONEY} Price: {price} credits"
     )
