@@ -28,7 +28,7 @@ import database as db
 import clients
 import payments
 import verification
-from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone, mask_secret, extract_year_from_reg_month, get_active_sessions_info, format_timestamp
+from utils import detect_country, get_country_flag, get_country_name, search_country, estimate_account_year, mask_phone, mask_secret, extract_year_from_reg_month, parse_reg_month, get_active_sessions_info, format_timestamp, format_account_year
 import custom_emojis as em
 em.patch_pyrogram_for_custom_emojis()
 
@@ -434,17 +434,17 @@ def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     ])
 
 
-def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, *, pick: bool = False) -> InlineKeyboardMarkup:
+def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, month: int | None = None, *, pick: bool = False) -> InlineKeyboardMarkup:
     """Country-confirm keyboard with an inline account-year adjuster row."""
     yes_cb = f"cc_pick:{cc}" if pick else "cc_yes"
-    year_label = str(year) if year else "Unknown"
+    year_label = format_account_year(year, month)
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(f"{em.SUCCESS} Yes, {cflag} {cname}", callback_data=yes_cb, style=S.SUCCESS),
             InlineKeyboardButton(f"{em.ERROR} No", callback_data="cc_no", style=S.DANGER),
         ],
         [
-            InlineKeyboardButton(f"{em.CALENDAR} Account Year: " + year_label, callback_data="ay_edit", style=S.PRIMARY),
+            InlineKeyboardButton(f"{em.CALENDAR} Year Old: " + year_label, callback_data="ay_edit", style=S.PRIMARY),
         ],
     ])
 
@@ -700,9 +700,10 @@ def _register_handlers(app: Client):
             await cq.answer("No pending action.", show_alert=True)
             return
         year = state.get("account_year")
-        year_label = str(year) if year else "Unknown"
+        month = state.get("account_month")
+        year_label = format_account_year(year, month)
         await safe_edit(cq.message,
-            f"{em.CALENDAR} **Adjust Account Year**\n\n"
+            f"{em.CALENDAR} **Adjust Year Old**\n\n"
             f"Auto-detected: **{year_label}**\n"
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
@@ -726,9 +727,10 @@ def _register_handlers(app: Client):
         current = state.get("account_year") or 2013
         new_year = current + delta
         state["account_year"] = new_year
-        year_label = str(new_year)
+        month = state.get("account_month")
+        year_label = format_account_year(new_year, month)
         await safe_edit(cq.message,
-            f"{em.CALENDAR} **Adjust Account Year**\n\n"
+            f"{em.CALENDAR} **Adjust Year Old**\n\n"
             f"Use + / − to correct it, then tap **Set**.",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -750,17 +752,18 @@ def _register_handlers(app: Client):
             return
         cc = state["country_code"]
         year = state.get("account_year")
+        month = state.get("account_month")
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         phone = state["phone"]
         await safe_edit(cq.message,
-            f"{em.SUCCESS} **Account year set to {year}**\n\n"
+            f"{em.SUCCESS} **Year Old set to {format_account_year(year, month)}**\n\n"
             f"{em.PHONE} `{phone}`\n"
             f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n\n"
             "Confirm and save?",
-            reply_markup=_confirm_country_kb(flag, name, cc, year),
+            reply_markup=_confirm_country_kb(flag, name, cc, year, month),
         )
-        await cq.answer(f"Year set to {year}")
+        await cq.answer(f"Year Old set to {format_account_year(year, month)}")
 
     # ── Country confirmation ──
 
@@ -777,6 +780,7 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         year = state.get("account_year")
+        month = state.get("account_month")
         email_added = state.get("email_added", False)
 
         price = await db.get_category_price(cc, year, email_added)
@@ -786,7 +790,7 @@ def _register_handlers(app: Client):
             await safe_edit(cq.message,
                 f"{em.MONEY} **New Category Detected!**\n\n"
                 f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-                f"{em.CALENDAR} Year: **{year}**\n"
+                f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
                 f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
@@ -798,8 +802,8 @@ def _register_handlers(app: Client):
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc,
                               account_id=state.get("account_id"), account_year=year,
-                              email_added=email_added)
-        await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
+                              account_month=month, email_added=email_added)
+        await db.set_session_account_info(phone, state.get("account_id"), year, email_added, account_month=month)
         auth_states.pop(cq.from_user.id, None)
 
         await alert(app,
@@ -807,7 +811,7 @@ def _register_handlers(app: Client):
             f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
             f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
@@ -850,6 +854,7 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         year = state.get("account_year")
+        month = state.get("account_month")
         email_added = state.get("email_added", False)
 
         price = await db.get_category_price(cc, year, email_added)
@@ -859,7 +864,7 @@ def _register_handlers(app: Client):
             await safe_edit(cq.message,
                 f"{em.MONEY} **New Category Detected!**\n\n"
                 f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-                f"{em.CALENDAR} Year: **{year}**\n"
+                f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
                 f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n\n"
                 f"This combination has no set price. Please send the price (in credits) for this category:",
                 reply_markup=InlineKeyboardMarkup([
@@ -871,8 +876,8 @@ def _register_handlers(app: Client):
         await db.save_session(phone, state["session_string"], cq.from_user.id,
                               password=state.get("password", ""), country_code=cc,
                               account_id=state.get("account_id"), account_year=year,
-                              email_added=email_added)
-        await db.set_session_account_info(phone, state.get("account_id"), year, email_added)
+                              account_month=month, email_added=email_added)
+        await db.set_session_account_info(phone, state.get("account_id"), year, email_added, account_month=month)
         auth_states.pop(cq.from_user.id, None)
 
         await alert(app,
@@ -880,7 +885,7 @@ def _register_handlers(app: Client):
             f"{em.SHIELD} Admin: `{cq.from_user.id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {name}\n"
-            f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(year, month)}**\n"
             f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
@@ -1036,9 +1041,9 @@ def _register_handlers(app: Client):
                 price = cat.get("price", 1)
                 email_str = "Yes" if email else "No"
                 
-                lines.append(f"{em.CALENDAR} Year: **{year}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
+                lines.append(f"{em.CALENDAR} Year Old: **{format_account_year(year)}** | {em.MAIL} Email: **{email_str}** — **{price}** cr")
                 buttons.append([InlineKeyboardButton(
-                    f"{em.EDIT} {year} | Email: {email_str} — {price} cr",
+                    f"{em.EDIT} {format_account_year(year)} | Email: {email_str} — {price} cr",
                     callback_data=f"editcat:{cc}:{year}:{email}", style=S.DEFAULT,
                 )])
         
@@ -1072,7 +1077,7 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message,
             f"{em.MONEY} **Update Category Price**\n\n"
             f"{em.GLOBE} Country: {get_country_flag(cc)} {get_country_name(cc)}\n"
-            f"{em.CALENDAR} Year: **{year}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
             f"{em.MAIL} Email Added: **{email_str}**\n\n"
             f"Send the new price (in credits) for this category:",
             reply_markup=InlineKeyboardMarkup([
@@ -1124,7 +1129,8 @@ def _register_handlers(app: Client):
                 phone = s["phone_number"]
                 status_icon = {"active": f"{em.ONLINE}", "sold": f"{em.OFFLINE}", "error": f"{em.WARNING}", "unlisted": f"{em.BLOCKED}"}.get(s.get("status"), f"{em.IDLE}")
                 acc_year = s.get("account_year")
-                year_str = f" ~{acc_year}" if acc_year else ""
+                acc_month = s.get("account_month")
+                year_str = f" ~{format_account_year(acc_year, acc_month)}" if acc_year else ""
                 p = await db.get_session_price(s)
                 price_str = f"{p} cr" if p is not None else "No price"
                 all_buttons.append([InlineKeyboardButton(
@@ -1205,7 +1211,8 @@ def _register_handlers(app: Client):
         pwd = session.get("password", "")
         error = session.get("last_error", "")
         acc_year = session.get("account_year")
-        age_line = f"{em.CALENDAR} **Account:** created ~{acc_year}\n" if acc_year else ""
+        acc_month = session.get("account_month")
+        age_line = f"{em.CALENDAR} **Year Old:** ~{format_account_year(acc_year, acc_month)}\n" if acc_year else ""
         email_added = session.get("email_added", False)
         email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
@@ -1324,7 +1331,8 @@ def _register_handlers(app: Client):
             flag = get_country_flag(cc)
             sold_price = s.get("sold_price", 0)
             acc_year = s.get("account_year")
-            year_str = f" ~{acc_year}" if acc_year else ""
+            acc_month = s.get("account_month")
+            year_str = f" ~{format_account_year(acc_year, acc_month)}" if acc_year else ""
             all_buttons.append([InlineKeyboardButton(
                 f"{em.OFFLINE} {flag} {phone}{year_str} — {sold_price} cr",
                 callback_data=f"sold_detail:{phone}", style=S.DEFAULT,
@@ -1373,7 +1381,8 @@ def _register_handlers(app: Client):
         if sold_at:
             sold_time = f"{em.CLOCK} **Sold At:** {sold_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
 
-        age_line = f"{em.CALENDAR} **Account Year:** ~{acc_year}\n" if acc_year else ""
+        acc_month = session.get("account_month")
+        age_line = f"{em.CALENDAR} **Year Old:** ~{format_account_year(acc_year, acc_month)}\n" if acc_year else ""
         email_line = f"{em.MAIL} **Email Added:** {'Yes' if email_added else 'No'}\n"
 
         order_line = f"{em.RECEIPT} **Order ID:** `{order_id}`\n" if order_id else ""
@@ -1410,8 +1419,9 @@ def _register_handlers(app: Client):
         flag = get_country_flag(cc)
         name = get_country_name(cc)
         year = session.get("account_year")
+        month = session.get("account_month")
         email = session.get("email_added", False)
-        year_label = str(year) if year else "Unknown"
+        year_label = format_account_year(year, month)
         email_str = "Yes" if email else "No"
 
         cat_price = await db.get_category_price(cc, year, email)
@@ -1424,7 +1434,7 @@ def _register_handlers(app: Client):
                 f"{em.WARNING} **New Category Detected!**\n\n"
                 f"{em.PHONE} Number: `{phone}`\n"
                 f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-                f"{em.CALENDAR} Year: **{year_label}**\n"
+                f"{em.CALENDAR} Year Old: **{year_label}**\n"
                 f"{em.MAIL} Email Added: **{email_str}**\n\n"
                 f"No price set for this combination.\n"
                 f"Send the price (in credits) for this category:",
@@ -1439,7 +1449,7 @@ def _register_handlers(app: Client):
             f"{prefix}"
             f"{em.CONFIG} **Edit Category — `{phone}`**\n\n"
             f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MAIL} Email Added: **{email_str}**\n"
             f"{em.MONEY} Current Price: **{price}** credits\n\n"
             "Select what to change:",
@@ -1447,7 +1457,7 @@ def _register_handlers(app: Client):
                 [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}", style=S.PRIMARY)],
                 [
                     InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1", style=S.DEFAULT),
-                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year Old: {year_label}", callback_data="noop", style=S.DEFAULT),
                     InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1", style=S.DEFAULT),
                 ],
                 [InlineKeyboardButton(
@@ -3429,14 +3439,14 @@ def _register_handlers(app: Client):
 
 # ── Auth helpers ──
 
-async def _account_info(client: Client, current_phone: str = "") -> tuple[int | None, int | None, bool, bool, int, str]:
-    """Fetch account id + creation year (exact via MTProto or estimated) + has_email + is_peer_flood + session_count + session_info."""
+async def _account_info(client: Client, current_phone: str = "") -> tuple[int | None, int | None, int | None, bool, bool, int, str]:
+    """Fetch account id + creation year/month (exact via MTProto or estimated) + has_email + is_peer_flood + session_count + session_info."""
     try:
         me = await client.get_me()
         account_id = me.id
     except Exception as e:
         log.error("Failed to get me from client: %s", e)
-        return None, None, False, False, 1, ""
+        return None, None, None, False, False, 1, ""
 
     has_email = False
     try:
@@ -3449,6 +3459,7 @@ async def _account_info(client: Client, current_phone: str = "") -> tuple[int | 
         log.warning("Failed to check email status: %s", e)
 
     exact_year = None
+    exact_month = None
     is_peer_flood = False
 
     # registration_month can only be read by ANOTHER account that A has just
@@ -3459,16 +3470,17 @@ async def _account_info(client: Client, current_phone: str = "") -> tuple[int | 
     try:
         reg_month, is_peer_flood = await clients.probe_registration_month(client, account_id, current_phone)
         if reg_month:
-            yr = extract_year_from_reg_month(reg_month)
+            yr, mo = parse_reg_month(reg_month)
             if yr:
                 exact_year = yr
-                log.info("Exact registration year for %s: %d (via cross-account probe)", me.id, yr)
+                exact_month = mo
+                log.info("Exact registration date for %s: year=%d month=%s (via cross-account probe)", me.id, yr, mo)
     except Exception as e:
         log.warning("Error during cross-account registration probe: %s", e)
 
     year = exact_year if exact_year is not None else estimate_account_year(account_id)
     session_count, session_info = await get_active_sessions_info(client)
-    return account_id, year, has_email, is_peer_flood, session_count, session_info
+    return account_id, year, exact_month, has_email, is_peer_flood, session_count, session_info
 
 
 
@@ -3547,7 +3559,7 @@ async def _handle_code(message: Message, code: str):
             phone_code_hash=state["phone_code_hash"],
             phone_code=clean_code,
         )
-        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        acc_id, acc_year, acc_month, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -3560,16 +3572,17 @@ async def _handle_code(message: Message, code: str):
             "country_code": cc,
             "account_id": acc_id,
             "account_year": acc_year,
+            "account_month": acc_month,
             "email_added": has_email,
         }
         sess_warn = f"\n\n⚠️ **Notice:** Account has **{sess_cnt} active sessions**." if sess_cnt > 1 else ""
         await safe_edit(status_msg,
             f"{em.SUCCESS} Code verified for `{phone}`\n\n"
             f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{acc_year or 'Unknown'}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(acc_year, acc_month)}**\n"
             f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**{sess_warn}\n\n"
             "Is this correct?",
-            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
+            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year, acc_month),
         )
     except SessionPasswordNeeded:
         auth_states[user_id]["step"] = "password"
@@ -3615,7 +3628,7 @@ async def _handle_password(message: Message, password: str):
 
     try:
         await client.check_password(password)
-        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        acc_id, acc_year, acc_month, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
@@ -3628,15 +3641,16 @@ async def _handle_password(message: Message, password: str):
             "country_code": cc,
             "account_id": acc_id,
             "account_year": acc_year,
+            "account_month": acc_month,
             "email_added": has_email,
         }
         await safe_edit(status_msg,
             f"{em.SUCCESS} Password accepted for `{phone}`\n\n"
             f"{em.GLOBE} Detected country: {cflag} **{cname}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{acc_year or 'Unknown'}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(acc_year, acc_month)}**\n"
             f"{em.MAIL} Email added: **{'Yes' if has_email else 'No'}**\n\n"
             "Is this correct?",
-            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year),
+            reply_markup=_confirm_country_kb(cflag, cname, cc, acc_year, acc_month),
         )
     except PasswordHashInvalid:
         await safe_edit(status_msg, f"{em.ERROR} Wrong password. Try again:")
@@ -3724,7 +3738,7 @@ async def _handle_update_category_price(message: Message, text: str):
     await message.reply(
         f"{em.SUCCESS} Category price successfully updated!\n\n"
         f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-        f"{em.CALENDAR} Year: **{year}**\n"
+        f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
         f"{em.MAIL} Email: **{email_str}**\n"
         f"{em.MONEY} New Price: **{price}** credits per OTP{act_str}",
         reply_markup=main_menu_kb(True),
@@ -3754,7 +3768,7 @@ async def _handle_manual_country(message: Message, text: str):
         email_added = state.get("email_added", False)
         await message.reply(
             f"{em.GLOBE} Found: {flag} **{name}** ({cc})\n"
-            f"{em.CALENDAR} Account year: **{year or 'Unknown'}**\n"
+            f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
             f"{em.MAIL} Email added: **{'Yes' if email_added else 'No'}**\n\n"
             f"Confirm this country for `{state['phone']}`?",
             reply_markup=_confirm_country_kb(flag, name, cc, year, pick=True),
@@ -3836,7 +3850,7 @@ async def _handle_edit_num_country(message: Message, text: str):
 
         session = await db.get_session(phone)
         year = session.get("account_year") if session else None
-        year_label = str(year) if year else "Unknown"
+        year_label = format_account_year(year)
         email = session.get("email_added", False) if session else False
         email_str = "Yes" if email else "No"
         price = await db.get_session_price(session) if session else 1
@@ -3845,14 +3859,14 @@ async def _handle_edit_num_country(message: Message, text: str):
             f"{em.SUCCESS} Country updated to {flag} **{name}** ({cc})\n\n"
             f"{em.CONFIG} **Edit Category — `{phone}`**\n\n"
             f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MAIL} Email Added: **{email_str}**\n"
             f"{em.MONEY} Current Price: **{price}** credits",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{em.GLOBE} Change Country ({cc})", callback_data=f"echg_cc:{phone}", style=S.PRIMARY)],
                 [
                     InlineKeyboardButton(f"{em.REMOVE}", callback_data=f"echg_yr:{phone}:-1", style=S.DEFAULT),
-                    InlineKeyboardButton(f"{em.CALENDAR} Year: {year_label}", callback_data="noop", style=S.DEFAULT),
+                    InlineKeyboardButton(f"{em.CALENDAR} Year Old: {year_label}", callback_data="noop", style=S.DEFAULT),
                     InlineKeyboardButton(f"{em.ADD}", callback_data=f"echg_yr:{phone}:+1", style=S.DEFAULT),
                 ],
                 [InlineKeyboardButton(
@@ -3903,13 +3917,13 @@ async def _handle_edit_num_set_price(message: Message, text: str):
 
     flag = get_country_flag(cc)
     name = get_country_name(cc)
-    year_label = str(year) if year else "Unknown"
+    year_label = format_account_year(year)
     email_str = "Yes" if email else "No"
 
     await message.reply(
         f"{em.SUCCESS} **Category price set!**\n\n"
         f"{em.GLOBE} Country: {flag} **{name}** ({cc})\n"
-        f"{em.CALENDAR} Year: **{year_label}**\n"
+        f"{em.CALENDAR} Year Old: **{year_label}**\n"
         f"{em.MAIL} Email: **{email_str}**\n"
         f"{em.MONEY} Price: **{price}** credits per OTP",
         reply_markup=InlineKeyboardMarkup([
@@ -4517,7 +4531,7 @@ async def _handle_set_new_category_price(message: Message, text: str):
         f"{em.SHIELD} Admin: `{user_id}`\n"
         f"{em.PHONE} Number: `{phone}`\n"
         f"{flag} Country: {name}\n"
-        f"{em.CALENDAR} Year: **{year if year else 'Unknown'}**\n"
+        f"{em.CALENDAR} Year Old: **{format_account_year(year)}**\n"
         f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
         f"{em.MONEY} Price: {price} credits"
     )
@@ -4612,11 +4626,11 @@ async def _handle_sell_code(message: Message, code: str):
             phone_code_hash=state["phone_code_hash"],
             phone_code=clean_code,
         )
-        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        acc_id, acc_year, acc_month, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
-        await _complete_sell_submission(user_id, status_msg, phone, session_string, "", state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info)
+        await _complete_sell_submission(user_id, status_msg, phone, session_string, "", state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info, acc_month)
     except SessionPasswordNeeded:
         sell_states[user_id]["step"] = "sell_password"
         await safe_edit(status_msg, f"{em.PASSWORD} 2FA is enabled on this account.\nEnter the 2FA password:")
@@ -4648,11 +4662,11 @@ async def _handle_sell_password(message: Message, password: str):
 
     try:
         await client.check_password(password)
-        acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
+        acc_id, acc_year, acc_month, has_email, is_peer_flood, sess_cnt, sess_info = await _account_info(client, phone)
         session_string = await client.export_session_string()
         await client.disconnect()
 
-        await _complete_sell_submission(user_id, status_msg, phone, session_string, password, state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info)
+        await _complete_sell_submission(user_id, status_msg, phone, session_string, password, state["country_code"], acc_id, acc_year, has_email, is_peer_flood, sess_cnt, sess_info, acc_month)
     except PasswordHashInvalid:
         await safe_edit(status_msg, f"{em.ERROR} Wrong password. Try again:")
     except Exception as e:
@@ -4664,7 +4678,7 @@ async def _handle_sell_password(message: Message, password: str):
         await safe_edit(status_msg, f"{em.ERROR} Error: `{e}`", reply_markup=back_kb("sell_account"))
 
 
-async def _complete_sell_submission(seller_id: int, status_msg, phone: str, session_string: str, password: str, cc: str, acc_id: int | None, acc_year: int | None, has_email: bool, is_peer_flood: bool, sess_cnt: int = 1, sess_info: str = ""):
+async def _complete_sell_submission(seller_id: int, status_msg, phone: str, session_string: str, password: str, cc: str, acc_id: int | None, acc_year: int | None, has_email: bool, is_peer_flood: bool, sess_cnt: int = 1, sess_info: str = "", acc_month: int | None = None):
     sell_states.pop(seller_id, None)
 
     if acc_id is not None and acc_id == seller_id:
@@ -4699,6 +4713,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
             "cc": cc,
             "acc_id": acc_id,
             "acc_year": acc_year,
+            "acc_month": acc_month,
             "has_email": has_email,
         }
         await safe_edit(status_msg,
@@ -4715,7 +4730,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
 
     flag = get_country_flag(cc)
     cname = get_country_name(cc)
-    year_label = str(acc_year) if acc_year else "Unknown"
+    year_label = format_account_year(acc_year, acc_month)
 
     # Guard against duplicate submissions BEFORE securing — re-rotating the
     # password on an already-listed account would invalidate the stored one.
@@ -4750,7 +4765,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
     cat_price = await db.get_category_price(cc, acc_year, has_email)
 
     listing = await db.create_sell_listing(
-        phone, seller_id, session_string, stored_password, cc, acc_id, acc_year, has_email,
+        phone, seller_id, session_string, stored_password, cc, acc_id, acc_year, has_email, account_month=acc_month,
     )
 
     if listing is None:
@@ -4764,7 +4779,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
 
     if cat_price is not None:
         updated_listing = await db.activate_sell_listing(listing["_id"], cat_price)
-        await db.save_session(phone, session_string, seller_id, password=stored_password, country_code=cc, account_id=acc_id, account_year=acc_year, email_added=has_email)
+        await db.save_session(phone, session_string, seller_id, password=stored_password, country_code=cc, account_id=acc_id, account_year=acc_year, account_month=acc_month, email_added=has_email)
 
         seller_payout = updated_listing["payout_credits"] if updated_listing else int(cat_price * SELLER_PAYOUT_PERCENT / 100)
 
@@ -4773,7 +4788,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
             f"{em.USER} Seller: `{seller_id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {cname}\n"
-            f"{em.CALENDAR} Year: **{year_label}**\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MONEY} Category Price: {cat_price} credits\n"
             f"{em.DOLLAR} Payout on sale: {seller_payout} credits"
         )
@@ -4781,7 +4796,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
         await safe_edit(status_msg,
             f"{em.SUCCESS} **Account Listed for Sale!**\n\n"
             f"{flag} `{phone}` ({cname})\n"
-            f"{em.CALENDAR} Account Year: **{year_label}**\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MONEY} Category Price: **{cat_price} credits**\n"
             f"{em.DOLLAR} You'll earn **{seller_payout} credits** ({SELLER_PAYOUT_PERCENT}%) **when a buyer purchases it**\n\n"
             f"Your account is now live in the store. You can still log into it any time from "
@@ -4794,7 +4809,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
             f"{em.USER} Seller: `{seller_id}`\n"
             f"{em.PHONE} Number: `{phone}`\n"
             f"{flag} Country: {cname} ({cc})\n"
-            f"{em.CALENDAR} Year: **{year_label}**\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MAIL} Email Added: **{'Yes' if has_email else 'No'}**\n\n"
             f"Set category price in **Admin Panel ➔ Country Pricing** to activate this account."
         )
@@ -4802,7 +4817,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
         await safe_edit(status_msg,
             f"{em.SUCCESS} **Account Submitted!**\n\n"
             f"{flag} `{phone}` ({cname})\n"
-            f"{em.CALENDAR} Account Year: **{year_label}**\n\n"
+            f"{em.CALENDAR} Year Old: **{year_label}**\n\n"
             f"⏳ Category price for {flag} {cname} ({year_label}) is being configured by admins.\n"
             f"Your account will automatically be listed once price setup is complete!",
             reply_markup=back_kb("sell_account"),

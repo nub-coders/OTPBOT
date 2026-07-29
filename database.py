@@ -302,7 +302,7 @@ async def set_last_daily_discount_time(dt: datetime):
 async def save_session(phone_number: str, session_string: str, added_by: int,
                        password: str = "", country_code: str = "XX",
                        account_id: int = None, account_year: int = None,
-                       email_added: bool = None):
+                       email_added: bool = None, account_month: int = None):
     if not country_code or country_code == "XX":
         detected, _, _ = detect_country(phone_number)
         if detected != "XX":
@@ -321,6 +321,8 @@ async def save_session(phone_number: str, session_string: str, added_by: int,
         doc["account_id"] = account_id
     if account_year is not None:
         doc["account_year"] = account_year
+    if account_month is not None:
+        doc["account_month"] = account_month
     if email_added is not None:
         doc["email_added"] = email_added
     await db.sessions.update_one(
@@ -490,8 +492,10 @@ async def set_session_password(phone_number: str, password: str):
     )
 
 
-async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None):
+async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None, account_month: int | None = None):
     update_doc = {"account_id": account_id, "account_year": account_year}
+    if account_month is not None:
+        update_doc["account_month"] = account_month
     if email_added is not None:
         update_doc["email_added"] = email_added
     await db.sessions.update_one(
@@ -501,12 +505,15 @@ async def set_session_account_info(phone_number: str, account_id: int, account_y
 
 
 async def set_session_category(phone_number: str, country_code: str = None,
-                               account_year: int = None, email_added: bool = None):
+                               account_year: int = None, email_added: bool = None,
+                               account_month: int = None):
     update_doc = {}
     if country_code is not None:
         update_doc["country_code"] = country_code
     if account_year is not None:
         update_doc["account_year"] = account_year
+    if account_month is not None:
+        update_doc["account_month"] = account_month
     if email_added is not None:
         update_doc["email_added"] = email_added
     if update_doc:
@@ -1166,6 +1173,7 @@ async def create_sell_listing(
     account_id: int = None,
     account_year: int = None,
     email_added: bool = False,
+    account_month: int = None,
 ) -> dict:
     """Create a new seller listing.
 
@@ -1186,6 +1194,7 @@ async def create_sell_listing(
         "country_code": country_code,
         "account_id": account_id,
         "account_year": account_year,
+        "account_month": account_month,
         "email_added": email_added,
         "status": "pending_price",  # will be updated to "active" once price is confirmed
         "payout_credits": 0,        # credits earned by seller when sold

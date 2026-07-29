@@ -263,19 +263,72 @@ def estimate_account_year(user_id: int) -> int | None:
     return None
 
 
-def extract_year_from_reg_month(reg_month) -> int | None:
-    """Extract 4-digit registration year from Telegram registration_month string or value (e.g. '05.2024' or '2024.05')."""
+def parse_reg_month(reg_month) -> tuple[int | None, int | None]:
+    """Extract (year, month) from Telegram registration_month string or value (e.g. '05.2024' or '2024.05')."""
     if not reg_month:
-        return None
+        return None, None
     try:
         s = str(reg_month).strip()
         import re
+        m = re.search(r'(\d{1,2})[\./-](\d{4})', s)
+        if m:
+            mm, yy = int(m.group(1)), int(m.group(2))
+            if 1 <= mm <= 12 and 2010 <= yy <= 2040:
+                return yy, mm
+        m = re.search(r'(\d{4})[\./-](\d{1,2})', s)
+        if m:
+            yy, mm = int(m.group(1)), int(m.group(2))
+            if 1 <= mm <= 12 and 2010 <= yy <= 2040:
+                return yy, mm
         m = re.search(r'\b(20[1-3][0-9])\b', s)
         if m:
-            return int(m.group(1))
+            return int(m.group(1)), None
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def extract_year_from_reg_month(reg_month) -> int | None:
+    """Extract 4-digit registration year from Telegram registration_month string or value (e.g. '05.2024' or '2024.05')."""
+    y, _ = parse_reg_month(reg_month)
+    return y
+
+
+def format_account_year(year: int | str | None, month: int | str | None = None) -> str:
+    """Format account year and optional month into 'X Year Old' representation.
+    - If 0 years old (less than 10 months), show 4-digit year (e.g. '2026').
+    - If >= 10 months, considered 1 year old ('1 Year Old', '2 Year Old', etc.).
+    """
+    if not year:
+        return "Unknown"
+    try:
+        y = int(year)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        cur_year = now.year
+        cur_month = now.month
+
+        if month is not None:
+            try:
+                m = int(month)
+                if 1 <= m <= 12:
+                    total_months = (cur_year - y) * 12 + (cur_month - m)
+                    if total_months < 0:
+                        total_months = 0
+                    years_old = (total_months + 2) // 12
+                    if years_old == 0:
+                        return str(y)
+                    return f"{years_old} Year Old"
+            except (ValueError, TypeError):
+                pass
+
+        years_old = max(0, cur_year - y)
+        if years_old == 0:
+            return str(y)
+        return f"{years_old} Year Old"
+    except Exception:
+        return str(year)
+
 
 
 def format_timestamp(ts: int) -> str:
