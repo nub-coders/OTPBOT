@@ -95,6 +95,26 @@ async def _on_new_message(client: Client, message):
                     f"⚠️ Issues logging in? Contact support:\n{support}",
                 )
                 log.info("[%s] OTP '%s' forwarded to user %d", phone, code, user_id)
+                try:
+                    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    feedback_kb = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("1️⃣", callback_data="rate_1"),
+                            InlineKeyboardButton("2️⃣", callback_data="rate_2"),
+                            InlineKeyboardButton("3️⃣", callback_data="rate_3"),
+                            InlineKeyboardButton("4️⃣", callback_data="rate_4"),
+                            InlineKeyboardButton("5️⃣", callback_data="rate_5"),
+                        ],
+                        [InlineKeyboardButton("🔙 Back to Menu", callback_data="main_menu")],
+                    ])
+                    await bot_app.send_message(
+                        user_id,
+                        "⭐ **Rate Your Experience**\n\n"
+                        "How would you rate your experience with our bot? Please tap a rating (1-5) below:",
+                        reply_markup=feedback_kb,
+                    )
+                except Exception as fe:
+                    log.warning("[%s] Failed to send feedback prompt after OTP: %s", phone, fe)
             except Exception as e:
                 log.error("[%s] Failed to forward OTP to %d: %s", phone, user_id, e)
 

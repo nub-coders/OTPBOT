@@ -92,3 +92,13 @@ CRYPTO_PLANS = {
     }
     for k, v in CREDIT_PLANS.items()
 }
+
+STARS_PER_CREDIT = float(os.getenv("STARS_PER_CREDIT", "1.0"))
+STARS_PLANS = {
+    k: {
+        **v,
+        "stars": int(v["credits"] * STARS_PER_CREDIT),
+    }
+    for k, v in CREDIT_PLANS.items()
+}
+
