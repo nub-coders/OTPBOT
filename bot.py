@@ -1,5 +1,7 @@
 import asyncio
+import time
 import logging
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pyrogram import Client, filters, enums
 
@@ -10,6 +12,8 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 from pyrogram.errors import (
     PhoneCodeInvalid,
@@ -23,7 +27,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
 import database as db
 import clients
 import payments
@@ -39,6 +43,7 @@ auth_states: dict[int, dict] = {}
 pay_states: dict[int, dict] = {}
 sell_states: dict[int, dict] = {}   # tracks user-side sell-account auth flow
 sell_recheck_states: dict[int, dict] = {}  # holds submission data for a pending session re-check
+feedback_states: dict[int, dict] = {}  # tracks user feedback rating & 1-min waiting window
 
 
 def get_credit_plan(plan_key: str) -> dict | None:
@@ -72,6 +77,24 @@ def get_crypto_plan(plan_key: str) -> dict | None:
         except Exception:
             return None
     return CRYPTO_PLANS.get(plan_key)
+
+
+def get_stars_plan(plan_key: str) -> dict | None:
+    if plan_key.startswith("custom_"):
+        try:
+            credits = int(plan_key.split("_")[1])
+            if credits < 10:
+                return None
+            stars = int(credits * STARS_PER_CREDIT)
+            return {
+                "credits": credits,
+                "stars": stars,
+                "label": f"{credits} Credits — ⭐{stars}",
+            }
+        except Exception:
+            return None
+    return STARS_PLANS.get(plan_key)
+
 
 
 def _random_discount_credits() -> int:
@@ -396,6 +419,9 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.TUTORIAL} How to Use", callback_data="how_to_use", style=S.DEFAULT),
             InlineKeyboardButton(f"{em.SUPPORT} Support", callback_data="support", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
+        ],
+        [
+            InlineKeyboardButton("⭐ Feedback", callback_data="feedback", style=S.PRIMARY),
         ],
     ]
     if UPDATES_CHANNEL:
@@ -898,11 +924,36 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "broadcast", "info",
+        "start", "help", "cancel", "broadcast", "info", "feedback",
     ]))
     async def on_text(_, message: Message):
         user_id = message.from_user.id
         text = message.text.strip()
+
+        # ── Feedback response flow ──
+        fstate = feedback_states.get(user_id)
+        if fstate:
+            if time.time() <= fstate["expiry"]:
+                rating = fstate["rating"]
+                feedback_states.pop(user_id, None)
+                username = message.from_user.username
+                user_mention = message.from_user.mention or message.from_user.first_name or f"User {user_id}"
+                user_str = f"{user_mention} (@{username})" if username else user_mention
+
+                alert_text = (
+                    f"📩 **New User Feedback Received**\n\n"
+                    f"{em.USER} **User:** {user_str} (`{user_id}`)\n"
+                    f"⭐ **Rating:** {rating}/5\n"
+                    f"💬 **Feedback:**\n{text}"
+                )
+                await alert(app, alert_text)
+                await message.reply(
+                    f"{em.CHECK} **Thank you for your feedback!**\n\nYour message has been sent to our team.",
+                    reply_markup=main_menu_kb(await db.is_admin(user_id)),
+                )
+                return
+            else:
+                feedback_states.pop(user_id, None)
 
         pstate = pay_states.get(user_id)
         if pstate:
@@ -946,6 +997,8 @@ def _register_handlers(app: Client):
             await _handle_rz_custom_amount(message, text)
         elif step == "cr_custom_amount":
             await _handle_cr_custom_amount(message, text)
+        elif step == "stars_custom_amount":
+            await _handle_stars_custom_amount(message, text)
         elif step == "set_new_category_price":
             await _handle_set_new_category_price(message, text)
         elif step == "edit_num_country":
@@ -2058,6 +2111,8 @@ def _register_handlers(app: Client):
             if method == "crypto_usdt":
                 total_inr = total * USDT_TO_INR
                 pay_lines += f"\n  {method}: {info['count']} payments, ₹{total_inr:.2f} ({total:.2f} USDT)"
+            elif method == "telegram_stars":
+                pay_lines += f"\n  {method}: {info['count']} payments, ⭐{int(total)} Stars"
             else:
                 pay_lines += f"\n  {method}: {info['count']} payments, ₹{total:.2f}"
 
@@ -2272,7 +2327,8 @@ def _register_handlers(app: Client):
             phone = s["phone_number"]
             masked = mask_phone(phone)
             year = s.get("account_year")
-            year_str = f" ({year})" if year else ""
+            month = s.get("account_month")
+            year_str = f" ({format_account_year(year, month)})" if year else ""
             email_icon = f" {em.MAIL}" if s.get("email_added") else ""
             p = session_prices[i]
             price_tag = "FREE" if p == 0 else f"{p} cr"
@@ -2673,6 +2729,9 @@ def _register_handlers(app: Client):
                 InlineKeyboardButton(f"{em.MONEY} Razorpay (UPI)", callback_data="rz_plans", style=S.SUCCESS),
                 InlineKeyboardButton(f"{em.COIN} Crypto (USDT)", callback_data="cr_plans", style=S.PRIMARY),
             ],
+            [
+                InlineKeyboardButton(f"{em.STAR} Telegram Stars", callback_data="stars_plans", style=S.PRIMARY),
+            ],
             [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
         ]
         await safe_edit(cq.message,
@@ -2882,6 +2941,107 @@ def _register_handlers(app: Client):
             ])
         )
 
+    # ── Telegram Stars Plans ──
+
+    @app.on_callback_query(filters.regex("^stars_plans$"))
+    @verified
+    async def cb_stars_plans(_, cq: CallbackQuery):
+        buttons = []
+        for key, plan in STARS_PLANS.items():
+            buttons.append([InlineKeyboardButton(
+                f"{plan['credits']} Credits — ⭐{plan['stars']} Stars",
+                callback_data=f"stars_pay:{key}",
+                style=S.SUCCESS,
+            )])
+        buttons.append([InlineKeyboardButton(f"{em.EDIT} Custom Amount", callback_data="stars_custom", style=S.PRIMARY)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="buy_credits", style=S.PRIMARY)])
+        await safe_edit(cq.message,
+            f"{em.STAR} **Telegram Stars — Choose a plan:**\n"
+            f"Rate: **1 Star = 1 Credit**",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^stars_pay:"))
+    @verified
+    async def cb_stars_pay(_, cq: CallbackQuery):
+        plan_key = cq.data.split(":", 1)[1]
+        plan = get_stars_plan(plan_key)
+        if not plan:
+            return await cq.answer("Invalid plan.", show_alert=True)
+        await cq.answer()
+        await app.send_invoice(
+            chat_id=cq.from_user.id,
+            title=f"{plan['credits']} Credits",
+            description=f"Top-up {plan['credits']} Credits in OTP Bot using Telegram Stars",
+            payload=f"stars:{cq.from_user.id}:{plan_key}:{plan['credits']}:{int(time.time())}",
+            currency="XTR",
+            prices=[LabeledPrice(label=f"{plan['credits']} Credits", amount=plan['stars'])],
+        )
+
+    @app.on_callback_query(filters.regex("^stars_custom$"))
+    @verified
+    async def cb_stars_custom(_, cq: CallbackQuery):
+        auth_states[cq.from_user.id] = {"step": "stars_custom_amount"}
+        await safe_edit(cq.message,
+            f"{em.SMS} **Enter the number of credits you want to purchase via Telegram Stars (minimum 10):**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="buy_credits", style=S.DANGER)]
+            ])
+        )
+
+    @app.on_pre_checkout_query()
+    async def on_pre_checkout(_, query: PreCheckoutQuery):
+        if query.invoice_payload and query.invoice_payload.startswith("stars:"):
+            await app.answer_pre_checkout_query(query.id, ok=True)
+        else:
+            await app.answer_pre_checkout_query(query.id, ok=False, error_message="Invalid payment request")
+
+    @app.on_message(filters.successful_payment)
+    async def on_successful_payment(_, message: Message):
+        sp = message.successful_payment
+        if not sp or not sp.invoice_payload or not sp.invoice_payload.startswith("stars:"):
+            return
+
+        parts = sp.invoice_payload.split(":")
+        if len(parts) < 4:
+            return
+
+        try:
+            user_id = int(parts[1])
+            plan_key = parts[2]
+            credits = int(parts[3])
+        except (ValueError, IndexError):
+            return
+
+        charge_id = sp.telegram_payment_charge_id or f"stars_{user_id}_{int(time.time())}"
+
+        # Deduplicate payment using ref_id
+        existing = await db.payments.find_one({"ref_id": charge_id})
+        if existing:
+            return
+
+        await db.add_credits(user_id, credits)
+        await db.save_payment(user_id, "telegram_stars", plan_key, sp.total_amount, "XTR", charge_id, credits=credits)
+        await _check_referral_reward(user_id, credits)
+
+        new_balance = await db.get_credits(user_id)
+        buyer = await db.get_user(user_id)
+        buyer_name = (buyer.get("first_name") or buyer.get("username") or str(user_id)) if buyer else str(user_id)
+
+        await alert(bot,
+            f"{em.STAR} **Credits Purchased (Telegram Stars)**\n\n"
+            f"{em.USER} User: `{user_id}` ({buyer_name})\n"
+            f"{em.GIFT} Credits: +{credits}\n"
+            f"{em.STAR} Stars: ⭐{sp.total_amount}\n"
+            f"{em.MONEY} New balance: {new_balance}"
+        )
+
+        await message.reply(
+            f"{em.SUCCESS} **Payment Successful!**\n\n"
+            f"You paid ⭐ **{sp.total_amount} Stars** and received **{credits} credits**.\n"
+            f"{em.MONEY} Current Balance: **{new_balance} credits**"
+        )
+
     # ── Sell Account (User Marketplace) ──
 
     @app.on_callback_query(filters.regex("^sell_account$"))
@@ -3078,7 +3238,8 @@ def _register_handlers(app: Client):
             cc = lst.get("country_code", "XX")
             flag = get_country_flag(cc)
             yr = lst.get("account_year")
-            yr_str = f" ~{yr}" if yr else ""
+            mo = lst.get("account_month")
+            yr_str = f" ~{format_account_year(yr, mo)}" if yr else ""
             all_buttons.append([InlineKeyboardButton(
                 f"{flag} {mask_phone(phone)}{yr_str} — Login",
                 callback_data=f"slogin:{phone}", style=S.PRIMARY,
@@ -3124,7 +3285,8 @@ def _register_handlers(app: Client):
             cc = lst.get("country_code", "XX")
             flag = get_country_flag(cc)
             yr = lst.get("account_year")
-            yr_str = f"~{yr}" if yr else "?"
+            mo = lst.get("account_month")
+            yr_str = f"{format_account_year(yr, mo)}" if yr else "?"
             payout = lst.get("payout_credits", 0)
             sold_at = lst.get("sold_at")
             when = sold_at.strftime("%d/%m/%Y") if sold_at else "—"
@@ -3216,7 +3378,8 @@ def _register_handlers(app: Client):
             cc = lst.get("country_code", "XX")
             flag = get_country_flag(cc)
             yr = lst.get("account_year")
-            yr_str = f" ~{yr}" if yr else ""
+            mo = lst.get("account_month")
+            yr_str = f" ~{format_account_year(yr, mo)}" if yr else ""
             em_str = " +Email" if lst.get("email_added") else ""
 
             all_buttons.append([InlineKeyboardButton(
@@ -3339,6 +3502,7 @@ def _register_handlers(app: Client):
             "/start — Main menu\n"
             "/help — This help page\n"
             "/info `<ORD-XXXXXXXX>` — Check an order's details\n"
+            "/feedback — Give feedback & rate our bot\n"
             "/cancel — Cancel current operation"
             "</blockquote>"
             f"{admin_section}"
@@ -3423,6 +3587,7 @@ def _register_handlers(app: Client):
     @app.on_message(filters.command("cancel") & filters.private)
     @verified
     async def cmd_cancel(_, message: Message):
+        feedback_states.pop(message.from_user.id, None)
         state = auth_states.pop(message.from_user.id, None)
         if state and "client" in state:
             try:
@@ -3435,6 +3600,76 @@ def _register_handlers(app: Client):
                 await db.is_admin(message.from_user.id)
             ),
         )
+
+    # ── Feedback Flow ──
+
+    def _feedback_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("1️⃣", callback_data="rate_1"),
+                InlineKeyboardButton("2️⃣", callback_data="rate_2"),
+                InlineKeyboardButton("3️⃣", callback_data="rate_3"),
+                InlineKeyboardButton("4️⃣", callback_data="rate_4"),
+                InlineKeyboardButton("5️⃣", callback_data="rate_5"),
+            ],
+            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
+        ])
+
+    @app.on_message(filters.command("feedback") & filters.private)
+    @verified
+    async def cmd_feedback(_, message: Message):
+        await message.reply(
+            "⭐ **Rate Your Experience**\n\n"
+            "How would you rate your experience with our bot? Please tap a rating (1-5) below:",
+            reply_markup=_feedback_kb(),
+        )
+
+    @app.on_callback_query(filters.regex("^feedback$"))
+    @verified
+    async def cb_feedback(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        await safe_edit(
+            cq.message,
+            "⭐ **Rate Your Experience**\n\n"
+            "How would you rate your experience with our bot? Please tap a rating (1-5) below:",
+            reply_markup=_feedback_kb(),
+        )
+
+    @app.on_callback_query(filters.regex("^rate_([1-5])$"))
+    @verified
+    async def cb_rate(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        rating = int(cq.matches[0].group(1))
+        user_id = cq.from_user.id
+
+        if rating >= 4:
+            bot_me = await app.get_me()
+            ref_link = f"https://t.me/{bot_me.username}?start=ref_{user_id}"
+            share_text = "Buy Telegram accounts & OTPs easily with this bot!"
+            share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={urllib.parse.quote(share_text)}"
+
+            buttons = [
+                [InlineKeyboardButton("📲 Share Bot", url=share_url)],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
+            ]
+            await safe_edit(
+                cq.message,
+                f"❤️ **Thank You For Your Support!** (Rating: {rating}/5 ⭐)\n\n"
+                "We're thrilled to hear that you love using our bot! If you find our service useful, please share it with your friends using the button below:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        else:
+            # ponytail: transient 60s memory lock for feedback collection without persistent database queue
+            feedback_states[user_id] = {
+                "expiry": time.time() + 60,
+                "rating": rating,
+            }
+            await safe_edit(
+                cq.message,
+                f"🙏 **We Value Your Feedback** (Rating: {rating}/5 ⭐)\n\n"
+                "We're sorry to hear that! Please reply to this message within **1 minute** with your feedback or suggestions, and we'll send it directly to our team.",
+                reply_markup=back_kb(),
+            )
 
 
 # ── Auth helpers ──
@@ -4149,6 +4384,16 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
             [InlineKeyboardButton(f"{em.UNLOCK} Release Account", callback_data=f"release:{phone}", style=S.DANGER)],
         ]),
     )
+    try:
+        await bot.send_message(
+            user_id,
+            "⭐ **Rate Your Experience**\n\n"
+            "How would you rate your experience with our bot? Please tap a rating (1-5) below:",
+            reply_markup=_feedback_kb(),
+        )
+    except Exception as e:
+        log.warning("Failed to send feedback prompt after purchase to user %d: %s", user_id, e)
+
     return True
 
 
@@ -4494,6 +4739,36 @@ async def _handle_cr_custom_amount(message: Message, text: str):
         f"{em.GLOBE} **Select network for USDT deposit ({plan['amount_usdt']} USDT for {credits} credits):**",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+async def _handle_stars_custom_amount(message: Message, text: str):
+    user_id = message.from_user.id
+    try:
+        credits = int(text.strip())
+        if credits < 10:
+            await message.reply(f"{em.ERROR} Minimum amount is 10 credits. Please try again:")
+            return
+    except ValueError:
+        await message.reply(f"{em.ERROR} Invalid number. Please enter a valid integer (minimum 10):")
+        return
+
+    auth_states.pop(user_id, None)
+
+    plan_key = f"custom_{credits}"
+    plan = get_stars_plan(plan_key)
+    if not plan:
+        await message.reply(f"{em.ERROR} Error generating plan. Try again.")
+        return
+
+    await message._client.send_invoice(
+        chat_id=user_id,
+        title=f"{plan['credits']} Credits",
+        description=f"Top-up {plan['credits']} Credits in OTP Bot using Telegram Stars",
+        payload=f"stars:{user_id}:{plan_key}:{plan['credits']}:{int(time.time())}",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{plan['credits']} Credits", amount=plan['stars'])],
+    )
+
 
 
 async def _handle_set_new_category_price(message: Message, text: str):
