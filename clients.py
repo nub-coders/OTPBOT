@@ -447,30 +447,11 @@ async def _fetch_email_otp(sent_after: float = 0.0) -> str | None:
     return None
 
 
-async def _set_recovery_email(client: Client, phone: str, current_password: str) -> None:
-    """Attach NEW_LOGIN_EMAIL as the 2FA recovery email using the raw API.
-    Called after a successful password change (enable sets it inline; change doesn't)."""
-    from pyrogram.utils import compute_password_check
-    try:
-        pwd_info = await client.invoke(raw_fn.account.GetPassword())
-        srp = compute_password_check(pwd_info, current_password)
-        await client.invoke(raw_fn.account.UpdatePasswordSettings(
-            password=srp,
-            new_settings=raw_types.account.PasswordInputSettings(
-                email=NEW_LOGIN_EMAIL,
-            )
-        ))
-        log.info("[%s] Recovery email set to %s", phone, NEW_LOGIN_EMAIL)
-    except Exception as e:
-        log.warning("[%s] Set recovery email failed (non-fatal): %s", phone, e)
-
-
 async def _change_password(client: Client, phone: str, old_password: str, new_password: str, has_password: bool = True) -> bool:
     """Set or rotate the account's 2FA password. Returns True on verified success."""
     try:
         if not has_password:
-            # enable_cloud_password accepts email directly — set recovery email inline
-            await client.enable_cloud_password(password=new_password, email=NEW_LOGIN_EMAIL)
+            await client.enable_cloud_password(password=new_password)
         else:
             await client.change_cloud_password(current_password=old_password, new_password=new_password)
     except Exception as e:
@@ -481,9 +462,6 @@ async def _change_password(client: Client, phone: str, old_password: str, new_pa
     try:
         await client.check_password(new_password)
         log.info("[%s] 2FA password %s and verified", phone, "set" if not has_password else "rotated")
-        # change_cloud_password has no email param — set recovery email separately
-        if has_password:
-            await _set_recovery_email(client, phone, new_password)
         return True
     except Exception as e:
         log.error("[%s] Password rotation failed verification: %s", phone, e)
