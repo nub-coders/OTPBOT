@@ -4,6 +4,16 @@ from decimal import Decimal
 
 load_dotenv()
 
+_MISSING = object()
+
+def get_env(key: str, default=_MISSING) -> str:
+    val = os.getenv(key)
+    if val:
+        return val
+    if default is _MISSING:
+        raise RuntimeError(f"Required env var {key!r} is not set")
+    return default
+
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")

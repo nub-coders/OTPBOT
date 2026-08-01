@@ -163,6 +163,7 @@ COUNTRY_CODES = [
     ("974", "QA", "Qatar", "\U0001f1f6\U0001f1e6"),
     ("40", "RO", "Romania", "\U0001f1f7\U0001f1f4"),
     ("7", "RU", "Russia", "\U0001f1f7\U0001f1fa"),
+    ("239", "ST", "São Tomé and Príncipe", "\U0001f1f8\U0001f1f9"),
     ("966", "SA", "Saudi Arabia", "\U0001f1f8\U0001f1e6"),
     ("381", "RS", "Serbia", "\U0001f1f7\U0001f1f8"),
     ("65", "SG", "Singapore", "\U0001f1f8\U0001f1ec"),

@@ -4,6 +4,7 @@ import logging
 import re
 import secrets
 import string
+import time
 import aiohttp
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
@@ -396,8 +397,9 @@ def generate_password(length: int = 8) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-async def _fetch_email_otp() -> str | None:
-    """Poll the inbox API for the latest Telegram verification code sent to NEW_LOGIN_EMAIL."""
+async def _fetch_email_otp(sent_after: float = 0.0) -> str | None:
+    """Poll the inbox API for the latest Telegram verification code sent to NEW_LOGIN_EMAIL.
+    sent_after: unix timestamp — skip emails older than this to avoid stale codes."""
     url = f"{INBOX_API_BASE}?to={NEW_LOGIN_EMAIL}&from=noreply@telegram.org&limit=1"
     try:
         async with aiohttp.ClientSession() as session:
@@ -414,6 +416,26 @@ async def _fetch_email_otp() -> str | None:
             items = []
         if items:
             msg = items[0]
+            # Skip emails that predate our send (use any timestamp field available).
+            if sent_after:
+                for ts_key in ("date", "received_at", "created_at", "timestamp"):
+                    raw_ts = msg.get(ts_key)
+                    if raw_ts:
+                        try:
+                            if isinstance(raw_ts, (int, float)):
+                                email_ts = float(raw_ts)
+                            else:
+                                from datetime import datetime
+                                import email.utils
+                                try:
+                                    email_ts = email.utils.parsedate_to_datetime(str(raw_ts)).timestamp()
+                                except Exception:
+                                    email_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+                            if email_ts < sent_after:
+                                return None  # stale
+                        except Exception:
+                            pass
+                        break
             text_content = " ".join(
                 str(msg.get(k, "")) for k in ("subject", "body", "text", "html")
             )
@@ -425,21 +447,48 @@ async def _fetch_email_otp() -> str | None:
     return None
 
 
-async def _change_password(client: Client, phone: str, old_password: str, new_password: str) -> bool:
-    """Rotate the account's 2FA password. Returns True on verified success."""
+async def _set_recovery_email(client: Client, phone: str, current_password: str) -> None:
+    """Attach NEW_LOGIN_EMAIL as the 2FA recovery email using the raw API.
+    Called after a successful password change (enable sets it inline; change doesn't)."""
+    from pyrogram.utils import compute_password_check
     try:
-        await client.change_cloud_password(current_password=old_password, new_password=new_password)
+        pwd_info = await client.invoke(raw_fn.account.GetPassword())
+        srp = compute_password_check(pwd_info, current_password)
+        await client.invoke(raw_fn.account.UpdatePasswordSettings(
+            password=srp,
+            new_settings=raw_types.account.PasswordInputSettings(
+                email=NEW_LOGIN_EMAIL,
+            )
+        ))
+        log.info("[%s] Recovery email set to %s", phone, NEW_LOGIN_EMAIL)
     except Exception as e:
-        # change_cloud_password can raise even when the change went through; the
+        log.warning("[%s] Set recovery email failed (non-fatal): %s", phone, e)
+
+
+async def _change_password(client: Client, phone: str, old_password: str, new_password: str, has_password: bool = True) -> bool:
+    """Set or rotate the account's 2FA password. Returns True on verified success."""
+    try:
+        if not has_password:
+            # enable_cloud_password accepts email directly — set recovery email inline
+            await client.enable_cloud_password(password=new_password, email=NEW_LOGIN_EMAIL)
+        else:
+            await client.change_cloud_password(current_password=old_password, new_password=new_password)
+    except Exception as e:
+        # These methods can raise even when the change went through;
         # check_password below is the source of truth.
-        log.warning("[%s] change_cloud_password raised (verifying anyway): %s", phone, e)
+        log.warning("[%s] %s raised (verifying anyway): %s",
+                    phone, "enable_cloud_password" if not has_password else "change_cloud_password", e)
     try:
         await client.check_password(new_password)
-        log.info("[%s] 2FA password rotated and verified", phone)
+        log.info("[%s] 2FA password %s and verified", phone, "set" if not has_password else "rotated")
+        # change_cloud_password has no email param — set recovery email separately
+        if has_password:
+            await _set_recovery_email(client, phone, new_password)
         return True
     except Exception as e:
         log.error("[%s] Password rotation failed verification: %s", phone, e)
         return False
+
 
 
 async def _change_login_email(client: Client, phone: str) -> bool:
@@ -456,13 +505,13 @@ async def _change_login_email(client: Client, phone: str) -> bool:
         return False
 
     otp_code = None
-    start = 0
-    while start < 20:  # ~60s at 3s intervals
-        otp_code = await _fetch_email_otp()
+    sent_at = time.time()
+    await asyncio.sleep(2)  # brief pause so the new email can arrive before first poll
+    for _ in range(20):  # ~60s at 3s intervals
+        otp_code = await _fetch_email_otp(sent_after=sent_at)
         if otp_code:
             break
         await asyncio.sleep(3)
-        start += 1
 
     if not otp_code:
         log.error("[%s] Timed out waiting for email OTP to %s", phone, NEW_LOGIN_EMAIL)
@@ -517,16 +566,18 @@ async def secure_purchased_account(phone: str, session_string: str, old_password
         return result
 
     try:
-        # Detect whether a login email already exists (we only switch, never add).
+        # Detect existing 2FA and login email state.
+        has_password = True  # safe default: try change rather than enable
         try:
             pwd_info = await client.invoke(raw_fn.account.GetPassword())
+            has_password = getattr(pwd_info, "has_password", True)
             result["email_present"] = getattr(pwd_info, "login_email_pattern", None) is not None
         except Exception as e:
             log.warning("[%s] GetPassword failed during secure: %s", phone, e)
 
-        # 1. Rotate 2FA password.
+        # 1. Set or rotate 2FA password.
         new_password = generate_password(8)
-        if await _change_password(client, phone, old_password, new_password):
+        if await _change_password(client, phone, old_password, new_password, has_password=has_password):
             result["ok"] = True
             result["new_password"] = new_password
         else:
