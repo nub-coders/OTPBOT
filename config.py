@@ -20,6 +20,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 MONGODB_URI = os.getenv("MONGODB_URI", "")
 OTP_TIMEOUT = int(os.getenv("OTP_TIMEOUT", "300"))
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+MODERATOR_IDS = [int(x) for x in os.getenv("MODERATOR_IDS", "6076474757").split(",") if x.strip()]
+MODERATOR_ID = MODERATOR_IDS[0] if MODERATOR_IDS else 6076474757
 CHAT_ID = int(os.getenv("CHAT_ID", "0")) or None
 _updates_raw = os.getenv("UPDATES_CHANNEL", "").strip()
 if _updates_raw.startswith(("https://", "http://")):

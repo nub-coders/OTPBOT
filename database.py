@@ -2,7 +2,7 @@ import motor.motor_asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
 from pymongo.errors import DuplicateKeyError
-from config import MONGODB_URI, ADMIN_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
+from config import MONGODB_URI, ADMIN_IDS, MODERATOR_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
 from utils import detect_country
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
@@ -43,11 +43,29 @@ async def set_user_role(telegram_id: int, role: str):
     )
 
 
+async def is_moderator(telegram_id: int) -> bool:
+    if telegram_id in MODERATOR_IDS:
+        return True
+    user = await get_user(telegram_id)
+    return user is not None and user.get("role") == "moderator"
+
+
 async def is_admin(telegram_id: int) -> bool:
+    if await is_moderator(telegram_id):
+        return True
     if telegram_id in ADMIN_IDS:
         return True
     user = await get_user(telegram_id)
-    return user is not None and user.get("role") == "admin"
+    return user is not None and user.get("role") in ("admin", "moderator")
+
+
+async def get_user_role(telegram_id: int) -> str:
+    if await is_moderator(telegram_id):
+        return "moderator"
+    if await is_admin(telegram_id):
+        return "admin"
+    user = await get_user(telegram_id)
+    return user.get("role", "user") if user else "user"
 
 
 async def get_all_users():
@@ -1270,6 +1288,15 @@ async def get_sell_listing_by_phone(phone_number: str) -> dict | None:
     return await db.sell_listings.find_one({"phone_number": phone_number})
 
 
+async def get_sell_listing_by_id(listing_id: str) -> dict | None:
+    from bson import ObjectId
+    try:
+        return await db.sell_listings.find_one({"_id": ObjectId(str(listing_id))})
+    except Exception:
+        return None
+
+
+
 async def get_pending_price_listings() -> list:
     return await db.sell_listings.find({"status": "pending_price"}).sort("created_at", 1).to_list(None)
 
@@ -1485,8 +1512,67 @@ async def mark_withdrawal_done(withdrawal_id, admin_note: str = "") -> bool:
     return result.modified_count > 0
 
 
+async def get_admin_withdrawal_available() -> dict:
+    """Calculate maximum withdrawable pool for admins:
+    total_revenue - 30% of total_revenue - total completed withdrawals (seller + admin) - pending admin requests.
+    """
+    rev_stats = await get_revenue_stats()
+    total_revenue = float(rev_stats["all"]["inr"])
+    platform_cut = round(0.30 * total_revenue, 2)
+    net_70_revenue = round(total_revenue - platform_cut, 2)
+
+    # Sum of all completed withdrawals (both seller and admin)
+    pipeline_completed = [
+        {"$match": {"status": "done"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]
+    total_completed = 0.0
+    async for doc in db.withdrawal_requests.aggregate(pipeline_completed):
+        total_completed = float(doc.get("total", 0) or 0)
+
+    # Sum of pending admin withdrawals
+    pipeline_pending_admin = [
+        {"$match": {"status": "pending", "request_type": "admin"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]
+    pending_admin = 0.0
+    async for doc in db.withdrawal_requests.aggregate(pipeline_pending_admin):
+        pending_admin = float(doc.get("total", 0) or 0)
+
+    available = max(0.0, round(net_70_revenue - total_completed - pending_admin, 2))
+    return {
+        "total_revenue": total_revenue,
+        "platform_cut": platform_cut,
+        "net_revenue": net_70_revenue,
+        "total_completed": total_completed,
+        "pending_admin": pending_admin,
+        "available": available,
+    }
+
+
+async def create_admin_withdrawal_request(admin_id: int, amount: float, method: str, details: str) -> dict:
+    """Create an admin withdrawal request if amount <= available pool."""
+    avail_info = await get_admin_withdrawal_available()
+    if amount <= 0 or amount > avail_info["available"]:
+        return {}
+
+    doc = {
+        "seller_id": admin_id,
+        "admin_id": admin_id,
+        "request_type": "admin",
+        "amount": amount,
+        "method": method,
+        "details": details,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = await db.withdrawal_requests.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return doc
+
+
 async def mark_withdrawal_rejected(withdrawal_id, reason: str = "") -> dict | None:
-    """Reject a withdrawal and refund the amount back to the seller's withdrawable balance."""
+    """Reject a withdrawal and refund the amount back to the seller's withdrawable balance if applicable."""
     from bson import ObjectId
     doc = await db.withdrawal_requests.find_one_and_update(
         {"_id": ObjectId(str(withdrawal_id)), "status": "pending"},
@@ -1497,8 +1583,8 @@ async def mark_withdrawal_rejected(withdrawal_id, reason: str = "") -> dict | No
         }},
         return_document=True,
     )
-    if doc:
-        # Refund back to the seller's withdrawable balance.
+    if doc and doc.get("request_type") != "admin":
+        # Refund back to seller's withdrawable balance.
         await db.users.update_one(
             {"telegram_id": doc["seller_id"]},
             {"$inc": {"balance": doc["amount"]}},

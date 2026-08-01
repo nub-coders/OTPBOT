@@ -27,7 +27,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
 import database as db
 import clients
 import payments
@@ -44,6 +44,7 @@ pay_states: dict[int, dict] = {}
 sell_states: dict[int, dict] = {}   # tracks user-side sell-account auth flow
 sell_recheck_states: dict[int, dict] = {}  # holds submission data for a pending session re-check
 feedback_states: dict[int, dict] = {}  # tracks user feedback rating & 1-min waiting window
+admin_withdraw_states: dict[int, dict] = {}  # tracks admin withdrawal creation flow
 
 
 def get_credit_plan(plan_key: str) -> dict | None:
@@ -191,17 +192,17 @@ async def _answer_cq(cq: CallbackQuery):
         pass
 
 
-async def alert(bot: Client, text: str):
+async def alert(bot: Client, text: str, reply_markup=None):
     """Send an alert to CHAT_ID channel, or to all admins if not configured."""
     if CHAT_ID:
         try:
-            await bot.send_message(CHAT_ID, text)
+            await bot.send_message(CHAT_ID, text, reply_markup=reply_markup)
         except Exception as e:
             log.error("Failed to send alert to CHAT_ID %s: %s", CHAT_ID, e)
     else:
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, text)
+                await bot.send_message(admin_id, text, reply_markup=reply_markup)
             except Exception as e:
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
@@ -433,7 +434,8 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def admin_kb() -> InlineKeyboardMarkup:
+def admin_kb(is_moderator: bool = False) -> InlineKeyboardMarkup:
+    withdraw_btn = InlineKeyboardButton(f"{em.DOLLAR} Withdrawals", callback_data="seller_withdrawals", style=S.DANGER) if is_moderator else InlineKeyboardButton(f"{em.DOLLAR} Request Withdrawal", callback_data="admin_withdrawal_req", style=S.PRIMARY)
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(f"{em.ADD} Add Number", callback_data="add_number", style=S.SUCCESS),
@@ -446,7 +448,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.PRIMARY)],
         [
             InlineKeyboardButton(f"{em.INBOX} Seller Submissions", callback_data="seller_submissions", style=S.SUCCESS),
-            InlineKeyboardButton(f"{em.DOLLAR} Withdrawals", callback_data="seller_withdrawals", style=S.DANGER),
+            withdraw_btn,
         ],
         [InlineKeyboardButton(f"{em.STATS} Stats", callback_data="stats", style=S.PRIMARY)],
         [InlineKeyboardButton(f"{em.BROADCAST} Broadcast", callback_data="broadcast_help", style=S.PRIMARY)],
@@ -680,9 +682,10 @@ def _register_handlers(app: Client):
         if not await db.is_admin(cq.from_user.id):
             await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
             return
+        is_mod = await db.is_moderator(cq.from_user.id)
         await safe_edit(cq.message, f"{em.GEAR} **Admin Panel**\n\n"
             f"Manage numbers, users, pricing, and broadcasts.",
-            reply_markup=admin_kb())
+            reply_markup=admin_kb(is_mod))
 
     # ── Add Number Flow ──
 
@@ -972,6 +975,16 @@ def _register_handlers(app: Client):
                 await _handle_sell_password(message, text)
             elif step == "sell_withdrawal_details":
                 await _handle_sell_withdrawal_details(message, text)
+            return
+
+        # ── Admin Withdrawal flow ──
+        awstate = admin_withdraw_states.get(user_id)
+        if awstate:
+            step = awstate["step"]
+            if step == "admin_withdrawal_amount":
+                await _handle_admin_withdrawal_amount(message, text)
+            elif step == "admin_withdrawal_details":
+                await _handle_admin_withdrawal_details(message, text)
             return
 
         state = auth_states.get(user_id)
@@ -1774,7 +1787,8 @@ def _register_handlers(app: Client):
 
         all_buttons = []
         for u in users:
-            role_icon = f"{em.OWNER}" if u["role"] == "admin" else f"{em.USER}"
+            u_role = await db.get_user_role(u["telegram_id"])
+            role_icon = f"{em.OWNER}" if u_role in ("admin", "moderator") else f"{em.USER}"
             name = u.get("first_name") or u.get("username") or str(u["telegram_id"])
             credits = u.get("credits", 0)
             all_buttons.append([
@@ -1896,7 +1910,7 @@ def _register_handlers(app: Client):
         uid = user["telegram_id"]
         uname = user.get("username") or "—"
         fname = user.get("first_name") or "—"
-        role = user.get("role", "user")
+        role = await db.get_user_role(uid)
         credits = user.get("credits", 0)
         verified_status = user.get("verified", False)
         referred_by = user.get("referred_by")
@@ -1905,7 +1919,7 @@ def _register_handlers(app: Client):
         created = user.get("created_at")
         created_str = created.strftime("%Y-%m-%d %H:%M UTC") if created else "—"
 
-        role_icon = f"{em.OWNER}" if role == "admin" else f"{em.USER}"
+        role_icon = f"{em.OWNER}" if role in ("admin", "moderator") else f"{em.USER}"
         verified_icon = f"{em.VERIFIED}" if verified_status else f"{em.UNVERIFIED}"
 
         ref_line = f"\n{em.LINK} Referred by: `{referred_by}`" if referred_by else ""
@@ -3399,26 +3413,112 @@ def _register_handlers(app: Client):
             flag = get_country_flag(cc)
             yr = lst.get("account_year")
             mo = lst.get("account_month")
-            yr_str = f" ~{format_account_year(yr, mo)}" if yr else ""
+            yr_str = f" ({format_account_year(yr, mo)})" if yr else ""
             em_str = " +Email" if lst.get("email_added") else ""
 
             all_buttons.append([InlineKeyboardButton(
-                f"{flag} {phone}{yr_str}{em_str} — Set Price",
-                callback_data=f"setcprice:{cc}", style=S.PRIMARY,
+                f"{flag} {mask_phone(phone)}{yr_str}{em_str} — Details & Set Price",
+                callback_data=f"view_pending_sub:{lst['_id']}", style=S.PRIMARY,
             )])
 
         await safe_edit(cq.message,
             f"{em.INBOX} **Pending Seller Submissions ({len(pending)})**\n\n"
             f"These accounts are waiting for their category price to be set.\n"
-            f"Tap an account to configure its category price in Country Pricing — once set, it will activate automatically.",
+            f"Tap an account to view details and set its category price — once set, it will activate automatically.",
             reply_markup=InlineKeyboardMarkup(all_buttons + [[InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)]]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^view_pending_sub:"))
+    @verified
+    async def cb_view_pending_sub(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        lid = cq.data.split(":", 1)[1]
+        listing = await db.get_sell_listing_by_id(lid)
+        if not listing or listing.get("status") != "pending_price":
+            await cq.answer("This submission is no longer pending.", show_alert=True)
+            await cb_seller_submissions(_, cq)
+            return
+
+        phone = listing["phone_number"]
+        cc = listing.get("country_code", "XX")
+        flag = get_country_flag(cc)
+        cname = get_country_name(cc)
+        yr = listing.get("account_year")
+        mo = listing.get("account_month")
+        year_label = format_account_year(yr, mo)
+        has_email = listing.get("email_added", False)
+        seller_id = listing.get("seller_id")
+
+        text = (
+            f"{em.INBOX} **Pending Seller Submission Details**\n\n"
+            f"{em.USER} Seller ID: `{seller_id}`\n"
+            f"{em.PHONE} Phone: `{mask_phone(phone)}`\n"
+            f"{flag} Country: **{cname}** (`{cc}`)\n"
+            f"{em.CALENDAR} Account Age: **{year_label}**\n"
+            f"{em.MAIL} Email Added: **{'Yes' if has_email else 'No'}**\n\n"
+            f"⚠️ **Category Price is not set** for `{cname}` ({year_label}, Email: {'Yes' if has_email else 'No'}).\n"
+            f"Tap **Set Category Price** below to configure the price and activate this account."
+        )
+
+        buttons = [
+            [InlineKeyboardButton(f"{em.MONEY} Set Category Price", callback_data=f"set_pending_cat_price:{lid}", style=S.PRIMARY)],
+            [InlineKeyboardButton(f"{em.BACK} Back to Submissions", callback_data="seller_submissions", style=S.DEFAULT)],
+        ]
+        await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+    @app.on_callback_query(filters.regex(r"^set_pending_cat_price:"))
+    @verified
+    async def cb_set_pending_cat_price(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        lid = cq.data.split(":", 1)[1]
+        listing = await db.get_sell_listing_by_id(lid)
+        if not listing:
+            await cq.answer("Listing not found.", show_alert=True)
+            return
+
+        cc = listing.get("country_code", "XX")
+        yr = listing.get("account_year")
+        mo = listing.get("account_month")
+        has_email = listing.get("email_added", False)
+        phone = listing["phone_number"]
+
+        auth_states[cq.from_user.id] = {
+            "step": "update_category_price_input",
+            "country_code": cc,
+            "year": yr,
+            "email_added": has_email,
+            "listing_id": lid,
+        }
+
+        flag = get_country_flag(cc)
+        cname = get_country_name(cc)
+        email_str = "Yes" if has_email else "No"
+        year_str = format_account_year(yr, mo)
+
+        await safe_edit(cq.message,
+            f"{em.MONEY} **Set Category Price**\n\n"
+            f"{em.PHONE} Account: `{mask_phone(phone)}`\n"
+            f"{flag} Country: **{cname}** (`{cc}`)\n"
+            f"{em.CALENDAR} Account Age: **{year_str}**\n"
+            f"{em.MAIL} Email Added: **{email_str}**\n\n"
+            f"Send the new price in credits for this category (e.g. `220`):\n"
+            f"*(Once set, this account and any other pending accounts in this category will activate automatically)*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="seller_submissions", style=S.DANGER)]
+            ])
         )
 
     @app.on_callback_query(filters.regex("^seller_withdrawals$"))
     @verified
     async def cb_seller_withdrawals(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+        if not await db.is_moderator(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Moderator only.", show_alert=True)
             return
 
         withdrawals = await db.get_pending_withdrawals()
@@ -3437,28 +3537,31 @@ def _register_handlers(app: Client):
             amt = w["amount"]
             mth = w["method"]
             dtl = w["details"]
-            lines.append(f"• `{sid}`: **{amt} cr** via {mth.upper()} (`{dtl}`)")
+            rtype = w.get("request_type", "seller")
+            rtag = "[ADMIN]" if rtype == "admin" else "[SELLER]"
+            unit = "₹" if rtype == "admin" else "cr"
+            lines.append(f"• {rtag} `{sid}`: **{amt} {unit}** via {mth.upper()} (`{dtl}`)")
             buttons.append([
-                InlineKeyboardButton(f"{em.SUCCESS} Paid {sid} ({amt} cr)", callback_data=f"approve_w:{wid}", style=S.SUCCESS),
+                InlineKeyboardButton(f"{em.SUCCESS} Paid {sid} ({amt} {unit})", callback_data=f"approve_w:{wid}", style=S.SUCCESS),
                 InlineKeyboardButton(f"{em.ERROR} Reject", callback_data=f"reject_w:{wid}", style=S.DANGER),
             ])
 
         buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)])
 
         await safe_edit(cq.message,
-            f"{em.DOLLAR} **Pending Seller Withdrawals ({len(withdrawals)})**\n\n" + "\n".join(lines),
+            f"{em.DOLLAR} **Pending Withdrawal Requests ({len(withdrawals)})**\n\n" + "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     @app.on_callback_query(filters.regex(r"^approve_w:"))
     @verified
     async def cb_approve_w(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+        if not await db.is_moderator(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Moderator only.", show_alert=True)
             return
 
         wid = cq.data.split(":", 1)[1]
-        ok = await db.mark_withdrawal_done(wid, admin_note=f"Approved by {cq.from_user.id}")
+        ok = await db.mark_withdrawal_done(wid, admin_note=f"Approved by moderator {cq.from_user.id}")
         if ok:
             await cq.answer("Withdrawal marked as paid!", show_alert=True)
             await cb_seller_withdrawals(app, cq)
@@ -3468,26 +3571,93 @@ def _register_handlers(app: Client):
     @app.on_callback_query(filters.regex(r"^reject_w:"))
     @verified
     async def cb_reject_w(_, cq: CallbackQuery):
-        if not await db.is_admin(cq.from_user.id):
-            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+        if not await db.is_moderator(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Moderator only.", show_alert=True)
             return
 
         wid = cq.data.split(":", 1)[1]
-        doc = await db.mark_withdrawal_rejected(wid, reason="Rejected by admin")
+        doc = await db.mark_withdrawal_rejected(wid, reason="Rejected by moderator")
         if doc:
-            await cq.answer("Withdrawal rejected and balance refunded.", show_alert=True)
+            await cq.answer("Withdrawal rejected.", show_alert=True)
             try:
-                await app.send_message(
-                    doc["seller_id"],
-                    f"{em.ERROR} **Withdrawal Request Rejected**\n\n"
-                    f"Your withdrawal request for **{doc['amount']} credits** was rejected by admin.\n"
-                    f"The amount has been refunded to your withdrawable balance.",
+                msg = (
+                    f"{em.ERROR} **Admin Withdrawal Request Rejected**\n\nYour withdrawal request for **₹{doc['amount']}** was rejected by moderator."
+                    if doc.get("request_type") == "admin"
+                    else f"{em.ERROR} **Withdrawal Request Rejected**\n\nYour withdrawal request for **{doc['amount']} credits** was rejected by moderator.\nThe amount has been refunded to your withdrawable balance."
                 )
+                await app.send_message(doc["seller_id"], msg)
             except Exception:
                 pass
             await cb_seller_withdrawals(app, cq)
         else:
             await cq.answer("Withdrawal request not found or already processed.", show_alert=True)
+
+    # ── Admin Withdrawal Request Flow ──
+
+    @app.on_callback_query(filters.regex("^admin_withdrawal_req$"))
+    @verified
+    async def cb_admin_withdrawal_req(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        avail_info = await db.get_admin_withdrawal_available()
+        tot_rev = avail_info["total_revenue"]
+        cut = avail_info["platform_cut"]
+        net = avail_info["net_revenue"]
+        comp = avail_info["total_completed"]
+        pend = avail_info["pending_admin"]
+        avail = avail_info["available"]
+
+        msg = (
+            f"{em.DOLLAR} **Admin Withdrawal Request**\n\n"
+            f"• Total Revenue: **₹{tot_rev:,.2f}**\n"
+            f"• Platform Cut (30%): **-₹{cut:,.2f}**\n"
+            f"• Net Revenue (70%): **₹{net:,.2f}**\n"
+            f"• Completed Withdrawals: **-₹{comp:,.2f}**\n"
+            f"• Pending Admin Requests: **-₹{pend:,.2f}**\n\n"
+            f"💰 **Available Pool: ₹{avail:,.2f}**\n\n"
+        )
+        if avail <= 0:
+            msg += f"{em.ERROR} No funds currently available to withdraw."
+            buttons = [[InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)]]
+        else:
+            msg += "Select payout method:"
+            buttons = [
+                [
+                    InlineKeyboardButton(f"💳 UPI", callback_data="admin_wmth:upi", style=S.SUCCESS),
+                    InlineKeyboardButton(f"🪙 Crypto USDT", callback_data="admin_wmth:usdt", style=S.SUCCESS),
+                ],
+                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)],
+            ]
+        await safe_edit(cq.message, msg, reply_markup=InlineKeyboardMarkup(buttons))
+
+    @app.on_callback_query(filters.regex(r"^admin_wmth:(upi|usdt)$"))
+    @verified
+    async def cb_admin_wmth(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+
+        mth = cq.data.split(":")[1]
+        avail_info = await db.get_admin_withdrawal_available()
+        avail = avail_info["available"]
+        if avail <= 0:
+            await cq.answer("No funds available to withdraw.", show_alert=True)
+            return
+
+        admin_withdraw_states[cq.from_user.id] = {
+            "step": "admin_withdrawal_amount",
+            "method": mth,
+            "available": avail,
+        }
+        await safe_edit(
+            cq.message,
+            f"{em.MONEY} **Enter Withdrawal Amount (INR)**\n\n"
+            f"Available pool: **₹{avail:,.2f}**\n\n"
+            f"Send the amount you wish to withdraw:",
+            reply_markup=back_kb("admin_panel"),
+        )
 
     # ── Help / Cancel ──
 
@@ -3965,6 +4135,29 @@ async def _handle_phone_direct(user_id: int, phone: str, reply_target):
         )
 
 
+async def _notify_activated_sellers(bot: Client, activated: list, cc: str, price: int):
+    if not activated:
+        return
+    flag = get_country_flag(cc)
+    cname = get_country_name(cc)
+    for act in activated:
+        sid = act.get("seller_id")
+        pnum = act.get("phone_number", "")
+        payout = act.get("payout_credits", int(price * SELLER_PAYOUT_PERCENT / 100))
+        if sid:
+            try:
+                await bot.send_message(
+                    sid,
+                    f"{em.SUCCESS} **Your Account is Now Active & Listed!**\n\n"
+                    f"{flag} Phone: `{mask_phone(pnum)}` ({cname})\n"
+                    f"{em.MONEY} Category Price: **{price} credits**\n"
+                    f"{em.DOLLAR} You'll earn **{payout} credits** ({SELLER_PAYOUT_PERCENT}%) **when a buyer purchases it**\n\n"
+                    f"Your account is now live in the store for buyers!"
+                )
+            except Exception as e:
+                log.error("Failed to notify seller %s of activated listing: %s", sid, e)
+
+
 async def _handle_update_category_price(message: Message, text: str):
     user_id = message.from_user.id
     state = auth_states[user_id]
@@ -3984,6 +4177,8 @@ async def _handle_update_category_price(message: Message, text: str):
     await db.set_category_price(cc, year, email, price)
     activated = await db.check_and_activate_pending_listings(cc, year, email)
     auth_states.pop(user_id, None)
+
+    await _notify_activated_sellers(message._client, activated, cc, price)
 
     flag = get_country_flag(cc)
     name = get_country_name(cc)
@@ -5139,14 +5334,18 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
             reply_markup=back_kb("sell_account"),
         )
     else:
+        btn = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.MONEY} Set Category Price", callback_data=f"set_pending_cat_price:{listing['_id']}", style=S.PRIMARY)]
+        ])
         await alert(bot,
             f"{em.ALERT} **New Seller Submission — Pending Category Price**\n\n"
             f"{em.USER} Seller: `{seller_id}`\n"
-            f"{em.PHONE} Number: `{phone}`\n"
+            f"{em.PHONE} Number: `{mask_phone(phone)}`\n"
             f"{flag} Country: {cname} ({cc})\n"
             f"{em.CALENDAR} Year Old: **{year_label}**\n"
             f"{em.MAIL} Email Added: **{'Yes' if has_email else 'No'}**\n\n"
-            f"Set category price in **Admin Panel ➔ Country Pricing** to activate this account."
+            f"Tap **Set Category Price** below to activate this account in the store.",
+            reply_markup=btn,
         )
 
         await safe_edit(status_msg,
@@ -5174,13 +5373,17 @@ async def _handle_sell_withdrawal_details(message: Message, text: str):
         await message.reply(f"{em.ERROR} Insufficient withdrawable balance.", reply_markup=back_kb("sell_account"))
         return
 
-    await alert(bot,
-        f"{em.ALERT} **New External Withdrawal Request**\n\n"
-        f"{em.USER} Seller: `{user_id}`\n"
-        f"{em.MONEY} Amount: **{amount} credits**\n"
-        f"{em.NOTE} Method: **{method.upper()}**\n"
-        f"{em.LINK} Details: `{details}`"
-    )
+    try:
+        await bot.send_message(
+            MODERATOR_ID,
+            f"{em.ALERT} **New Seller Withdrawal Request**\n\n"
+            f"{em.USER} Seller: `{user_id}`\n"
+            f"{em.MONEY} Amount: **{amount} credits**\n"
+            f"{em.NOTE} Method: **{method.upper()}**\n"
+            f"{em.LINK} Details: `{details}`"
+        )
+    except Exception as e:
+        log.error("Failed to notify moderator %d: %s", MODERATOR_ID, e)
 
     await message.reply(
         f"{em.SUCCESS} **Withdrawal Request Submitted!**\n\n"
@@ -5189,5 +5392,77 @@ async def _handle_sell_withdrawal_details(message: Message, text: str):
         f"{em.LINK} Details: `{details}`\n\n"
         f"Admins will process your payment shortly.",
         reply_markup=main_menu_kb(False),
+    )
+
+
+async def _handle_admin_withdrawal_amount(message: Message, text: str):
+    user_id = message.from_user.id
+    state = admin_withdraw_states.get(user_id)
+    if not state:
+        return
+
+    try:
+        amount = float(text.strip())
+        if amount <= 0:
+            raise ValueError()
+    except ValueError:
+        await message.reply(f"{em.ERROR} Invalid amount. Please send a valid positive number.")
+        return
+
+    avail_info = await db.get_admin_withdrawal_available()
+    avail = avail_info["available"]
+    if amount > avail:
+        await message.reply(
+            f"{em.ERROR} Amount exceeds available pool (₹{avail:,.2f}). Please enter a smaller amount:"
+        )
+        return
+
+    state["amount"] = amount
+    state["step"] = "admin_withdrawal_details"
+
+    mth = state["method"]
+    prompt = "UPI ID (e.g. `user@upi`)" if mth == "upi" else "Crypto USDT Wallet Address (TRC20/BEP20)"
+    await message.reply(
+        f"{em.NOTE} **Enter Payout Details**\n\n"
+        f"Selected Amount: **₹{amount:,.2f}** ({mth.upper()})\n\n"
+        f"Send your {prompt}:",
+        reply_markup=back_kb("admin_panel"),
+    )
+
+
+async def _handle_admin_withdrawal_details(message: Message, text: str):
+    user_id = message.from_user.id
+    state = admin_withdraw_states.pop(user_id, None)
+    if not state:
+        return
+
+    method = state["method"]
+    amount = state["amount"]
+    details = text.strip()
+
+    req = await db.create_admin_withdrawal_request(user_id, amount, method, details)
+    if not req:
+        await message.reply(f"{em.ERROR} Withdrawal request failed or exceeds available pool.", reply_markup=back_kb("admin_panel"))
+        return
+
+    try:
+        await bot.send_message(
+            MODERATOR_ID,
+            f"{em.ALERT} **New Admin Withdrawal Request**\n\n"
+            f"{em.USER} Admin: `{user_id}`\n"
+            f"{em.MONEY} Amount: **₹{amount:,.2f}**\n"
+            f"{em.NOTE} Method: **{method.upper()}**\n"
+            f"{em.LINK} Details: `{details}`"
+        )
+    except Exception as e:
+        log.error("Failed to notify moderator %d: %s", MODERATOR_ID, e)
+
+    await message.reply(
+        f"{em.SUCCESS} **Admin Withdrawal Request Submitted!**\n\n"
+        f"{em.MONEY} Amount: **₹{amount:,.2f}**\n"
+        f"{em.NOTE} Method: **{method.upper()}**\n"
+        f"{em.LINK} Details: `{details}`\n\n"
+        f"Moderator will process your payout shortly.",
+        reply_markup=admin_kb(await db.is_moderator(user_id)),
     )
 
