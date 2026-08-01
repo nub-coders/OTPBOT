@@ -384,3 +384,22 @@ def search_country(query: str) -> list[tuple[str, str, str]]:
         if q in name.lower():
             partial.append((code, name, flag))
     return partial[:5]
+
+
+def is_account_frozen_me(me) -> bool:
+    """Check if Pyrogram User object represents a frozen account."""
+    if not me:
+        return False
+    bot_verif = getattr(me, "bot_verification", None)
+    if bot_verif:
+        desc = getattr(bot_verif, "description", "") or ""
+        if "frozen" in desc.lower():
+            return True
+        if getattr(bot_verif, "custom_emoji_id", None):
+            return True
+    verif_status = getattr(me, "verification_status", None)
+    if verif_status:
+        if getattr(verif_status, "bot_verification_icon_custom_emoji_id", None):
+            return True
+    return False
+

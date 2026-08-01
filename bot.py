@@ -2407,6 +2407,25 @@ def _register_handlers(app: Client):
 
         await _finalize_purchase(cq.from_user.id, phone, edit_msg=cq.message)
 
+    @app.on_callback_query(filters.regex(r"^confirm_frozen:"))
+    @verified
+    async def cb_confirm_frozen(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        await _finalize_purchase(cq.from_user.id, phone, edit_msg=cq.message, confirmed_frozen=True)
+
+    @app.on_callback_query(filters.regex(r"^cancel_frozen:"))
+    @verified
+    async def cb_cancel_frozen(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        await clients.stop_session(phone)
+        await db.unreserve_session(phone)
+        await safe_edit(cq.message,
+            f"{em.CANCELLED} Purchase cancelled.",
+            reply_markup=back_kb("get_number")
+        )
+
     async def _start_shortfall_topup(cq, phone, cc, base_price, price, total_funds, saved):
         """Generate a Razorpay QR for (effective price − total_funds) and, once paid,
         assign the selected number automatically."""
@@ -4180,7 +4199,7 @@ async def _send_or_edit(user_id: int, edit_msg, text, reply_markup=None):
     return await bot.send_message(user_id, text, reply_markup=reply_markup)
 
 
-async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
+async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_frozen: bool = False) -> bool:
     """Connect the session, deduct the effective price and assign the number.
 
     Price and offer are recomputed at call time so this is safe to invoke after a
@@ -4311,6 +4330,24 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
                 reply_markup=back_kb("main_menu"))
             return False
 
+    is_frozen = clients.is_account_frozen(phone)
+    if is_frozen and (price > 10 or base_price > 10) and not confirmed_frozen:
+        confirm_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"{em.SUCCESS} Yes, Continue", callback_data=f"confirm_frozen:{phone}", style=S.SUCCESS),
+                InlineKeyboardButton(f"{em.CANCELLED} Cancel", callback_data=f"cancel_frozen:{phone}", style=S.DANGER),
+            ]
+        ])
+        await _send_or_edit(user_id, edit_msg,
+            f"{em.WARNING} **This account may be frozen.**\n\n"
+            f"📱 Number: `{phone}`\n"
+            f"{em.MONEY} Price: **{price}** credits\n"
+            f"Status: **frozen**\n\n"
+            f"Are you sure to continue?",
+            reply_markup=confirm_kb
+        )
+        return False
+
     credits_deducted, balance_deducted = 0, 0
     if price > 0:
         ok, credits_deducted, balance_deducted = await db.deduct_funds_for_purchase(user_id, price)
@@ -4344,6 +4381,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
             f"{em.GIFT} Offer discount: **{saved}** credits\n"
             f"{em.CREDIT} Actual credits used: {paid_display}\n"
         )
+    status_str = "frozen" if is_frozen else "normal"
     # Defer this admin alert until an OTP is actually forwarded — stash the
     # text on the active request so clients.py can send it at that point.
     purchase_alert = (
@@ -4352,18 +4390,34 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{em.USER} User: `{user_id}` (@{uname})\n"
         f"{em.PHONE} Number: `{phone}`\n"
         f"{flag} Country: {name}\n"
+        f"Status: **{status_str}**\n"
         f"{admin_price_line}"
         f"{em.MONEY} Remaining funds: **{total_funds}** ({credits} credits, {balance} withdrawable)"
     )
     req_info = clients.active_requests.get(phone)
     if req_info is not None:
         req_info["purchase_alert"] = purchase_alert
+
+    # Send immediate alert to CHAT_ID upon assignment
+    assign_alert = (
+        f"{em.PHONE} **Number Assigned**\n\n"
+        f"{em.RECEIPT} Order ID: `{order_id}`\n"
+        f"{em.USER} User: `{user_id}` (@{uname})\n"
+        f"{em.PHONE} Number: `{phone}`\n"
+        f"{flag} Country: {name}\n"
+        f"Status: **{status_str}**\n"
+        f"{admin_price_line}"
+        f"{em.MONEY} Remaining funds: **{total_funds}** ({credits} credits, {balance} withdrawable)"
+    )
+    await alert(bot, assign_alert)
+
     credit_line = f"\n{em.CREDIT} Credits: {credits}\n{em.MONEY} Withdrawable Balance: {balance}"
     acc_year = session.get("account_year")
     acc_month = session.get("account_month")
     age_line = f"\n{em.CALENDAR} Year Old: ~{format_account_year(acc_year, acc_month)}" if acc_year else ""
     email_added = session.get("email_added", False)
     email_line = f"\n{em.MAIL} Email Added: {'Yes' if email_added else 'No'}"
+    status_line = f"\nStatus: {status_str}"
     support = " | ".join(SUPPORT_HANDLES)
     if saved > 0:
         price_display = "**FREE** 🎉" if price == 0 else f"**{price}** credits (deducted)"
@@ -4379,7 +4433,7 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None) -> bool:
         f"{flag} {name}\n"
         f"{em.PHONE} `{phone}`\n"
         f"{price_line}"
-        f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{credit_line}\n\n"
+        f"{em.TIMER} Login window: {OTP_TIMEOUT // 60} min{age_line}{email_line}{status_line}{credit_line}\n\n"
         "The login OTP for this account will be forwarded to you here.\n\n"
         "ℹ️ Your account will be with us for 24 hours and after that you can log us out.\n"
         "In this time, you can get OTP again anytime under the History section.\n\n"

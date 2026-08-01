@@ -492,12 +492,14 @@ async def set_session_password(phone_number: str, password: str):
     )
 
 
-async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None, account_month: int | None = None):
+async def set_session_account_info(phone_number: str, account_id: int, account_year: int | None, email_added: bool | None = None, account_month: int | None = None, is_frozen: bool | None = None):
     update_doc = {"account_id": account_id, "account_year": account_year}
     if account_month is not None:
         update_doc["account_month"] = account_month
     if email_added is not None:
         update_doc["email_added"] = email_added
+    if is_frozen is not None:
+        update_doc["is_frozen"] = is_frozen
     await db.sessions.update_one(
         {"phone_number": phone_number},
         {"$set": update_doc},

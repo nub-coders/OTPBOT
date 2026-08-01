@@ -16,7 +16,7 @@ from config import (
     NEW_LOGIN_EMAIL, INBOX_API_BASE, INBOX_API_KEY,
 )
 import database as db
-from utils import extract_otp, detect_country, estimate_account_year
+from utils import extract_otp, detect_country, estimate_account_year, is_account_frozen_me
 
 log = logging.getLogger(__name__)
 
@@ -274,13 +274,24 @@ async def start_session(phone: str, session_string: str):
 
     try:
         me = await client.get_me()
+        client.me = me
         year = estimate_account_year(me.id)
-        await db.set_session_account_info(phone, me.id, year)
-        log.info("[%s] Logged in as %s (ID: %d, ~%s)", phone, me.first_name, me.id, year)
+        frozen = is_account_frozen_me(me)
+        await db.set_session_account_info(phone, me.id, year, is_frozen=frozen)
+        log.info("[%s] Logged in as %s (ID: %d, ~%s, Frozen: %s)", phone, me.first_name, me.id, year, frozen)
     except Exception as e:
         log.warning("[%s] get_me failed: %s", phone, e)
 
     log.info("[%s] Session started, listening for messages from 777000", phone)
+
+
+def is_account_frozen(phone: str) -> bool:
+    """Check if an active client account is frozen."""
+    client = active_clients.get(phone)
+    if client and getattr(client, "me", None):
+        return is_account_frozen_me(client.me)
+    return False
+
 
 
 async def stop_session(phone: str):
