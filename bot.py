@@ -1,7 +1,9 @@
 import asyncio
 import time
 import logging
+import io
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from pyrogram import Client, filters, enums
 
@@ -182,6 +184,23 @@ async def safe_edit(message, text, **kwargs):
         return await message.edit_text(text, **kwargs)
     except MessageNotModified:
         pass
+
+
+async def safe_send_photo(chat_id: int, photo_url: str, caption: str, reply_markup=None):
+    """Send photo by URL. Fall back to direct byte download if Telegram cURL fails, then to text message."""
+    try:
+        return await bot.send_photo(chat_id, photo=photo_url, caption=caption, reply_markup=reply_markup)
+    except Exception as e:
+        log.warning("send_photo via URL (%s) failed: %s. Fetching bytes directly...", photo_url, e)
+        try:
+            req = urllib.request.Request(photo_url, headers={"User-Agent": "Mozilla/5.0"})
+            data = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=10).read())
+            bio = io.BytesIO(data)
+            bio.name = "qr.png"
+            return await bot.send_photo(chat_id, photo=bio, caption=caption, reply_markup=reply_markup)
+        except Exception as e2:
+            log.error("send_photo via bytes failed: %s. Falling back to text message.", e2)
+            return await bot.send_message(chat_id, caption, reply_markup=reply_markup)
 
 
 async def _answer_cq(cq: CallbackQuery):
@@ -486,6 +505,19 @@ def admin_kb(is_moderator: bool = False) -> InlineKeyboardMarkup:
 def back_kb(target: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{em.BACK} Back", callback_data=target, style=S.PRIMARY)],
+    ])
+
+
+def _feedback_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1️⃣", callback_data="rate_1"),
+            InlineKeyboardButton("2️⃣", callback_data="rate_2"),
+            InlineKeyboardButton("3️⃣", callback_data="rate_3"),
+            InlineKeyboardButton("4️⃣", callback_data="rate_4"),
+            InlineKeyboardButton("5️⃣", callback_data="rate_5"),
+        ],
+        [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
     ])
 
 
@@ -2525,9 +2557,9 @@ def _register_handlers(app: Client):
 
         flag = get_country_flag(cc)
         offer_line = f"{em.GIFT} Offer: **{saved} credits off** (was {base_price})\n" if saved > 0 else ""
-        qr_msg = await bot.send_photo(
+        qr_msg = await safe_send_photo(
             cq.from_user.id,
-            photo=qr["image_url"],
+            photo_url=qr["image_url"],
             caption=(
                 f"{em.MONEY} **Top up to grab this account**\n\n"
                 f"{flag} `{mask_phone(phone)}` — **{price}** credits\n"
@@ -2856,9 +2888,9 @@ def _register_handlers(app: Client):
         except Exception:
             pass
 
-        qr_msg = await bot.send_photo(
+        qr_msg = await safe_send_photo(
             cq.from_user.id,
-            photo=qr["image_url"],
+            photo_url=qr["image_url"],
             caption=(
                 f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
                 f"{em.GIFT} You'll receive **{plan['credits']} credits**\n\n"
@@ -3828,18 +3860,6 @@ def _register_handlers(app: Client):
         )
 
     # ── Feedback Flow ──
-
-    def _feedback_kb() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("1️⃣", callback_data="rate_1"),
-                InlineKeyboardButton("2️⃣", callback_data="rate_2"),
-                InlineKeyboardButton("3️⃣", callback_data="rate_3"),
-                InlineKeyboardButton("4️⃣", callback_data="rate_4"),
-                InlineKeyboardButton("5️⃣", callback_data="rate_5"),
-            ],
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
-        ])
 
     @app.on_message(filters.command("feedback") & filters.private)
     @verified
@@ -4982,9 +5002,9 @@ async def _handle_rz_custom_amount(message: Message, text: str):
     except Exception:
         pass
 
-    qr_msg = await bot.send_photo(
+    qr_msg = await safe_send_photo(
         user_id,
-        photo=qr["image_url"],
+        photo_url=qr["image_url"],
         caption=(
             f"{em.PHONE} **Scan to pay ₹{plan['amount_inr'] // 100}**\n"
             f"{em.GIFT} You'll receive **{plan['credits']} credits**\n\n"
