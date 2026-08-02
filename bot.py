@@ -243,6 +243,9 @@ async def _check_referral_reward(user_id: int, purchased_credits: int):
 
 
 _daily_discount_lock = asyncio.Lock()
+# ponytail: monotonic timestamp of the last daily-discount run; 0.0 = not yet
+# checked this process, so the first check syncs from Mongo.
+_last_daily_discount_check: float = 0.0
 
 
 async def _process_daily_discounts(client):
@@ -313,16 +316,36 @@ async def _process_daily_discounts(client):
 
 async def _check_and_trigger_daily_discounts(client):
     """Check if 24h have passed since last daily discount run; if so, trigger background task."""
-    # ponytail: naive lock ceiling: Mongo single instance timestamp check
+    # ponytail: in-memory monotonic timestamp instead of Mongo round-trip per action.
+    # Falls back to Mongo on first check after restart.
+    global _last_daily_discount_check
+    now_mono = time.monotonic()
+
     async with _daily_discount_lock:
-        now = datetime.now(timezone.utc)
-        last_run = await db.get_last_daily_discount_time()
-        if last_run:
-            if last_run.tzinfo is None:
-                last_run = last_run.replace(tzinfo=timezone.utc)
-            if (now - last_run).total_seconds() < 86400:
+        if _last_daily_discount_check == 0.0:
+            # First check since process start — sync from Mongo.
+            last_run_dt = await db.get_last_daily_discount_time()
+            if last_run_dt:
+                if last_run_dt.tzinfo is None:
+                    last_run_dt = last_run_dt.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_run_dt).total_seconds()
+                if elapsed < 86400:
+                    # Still in the cooldown — seed the monotonic timer with the
+                    # remaining cooldown so we don't run until 24h from the last Mongo run.
+                    _last_daily_discount_check = now_mono - elapsed
+                    return
+            # Either no last_run in Mongo or cooldown expired — run immediately.
+            _last_daily_discount_check = now_mono
+        else:
+            # Normal in-memory check.
+            elapsed = now_mono - _last_daily_discount_check
+            if elapsed < 86400:
                 return
-        await db.set_last_daily_discount_time(now)
+            _last_daily_discount_check = now_mono
+
+        # Persist timestamp to Mongo so next restart sees it.
+        await db.set_last_daily_discount_time(datetime.now(timezone.utc))
+
     await _process_daily_discounts(client)
 
 
@@ -331,6 +354,7 @@ def check_daily_discount(func):
     from functools import wraps
     @wraps(func)
     async def wrapper(client, update, *args, **kwargs):
+        db.begin_user_cache()
         asyncio.create_task(_check_and_trigger_daily_discounts(client))
         return await func(client, update, *args, **kwargs)
     return wrapper
@@ -340,6 +364,9 @@ def verified(func):
     from functools import wraps
     @wraps(func)
     async def wrapper(client, update, *args, **kwargs):
+        # ponytail: start per-task user cache so get_user/get_credits/is_admin
+        # etc hit ctx-var instead of separate Mongo round-trips.
+        db.begin_user_cache()
         asyncio.create_task(_check_and_trigger_daily_discounts(client))
 
         if VERIFICATION_ENABLED:
@@ -930,6 +957,7 @@ def _register_handlers(app: Client):
         "start", "help", "cancel", "broadcast", "info", "feedback",
     ]))
     async def on_text(_, message: Message):
+        db.begin_user_cache()
         user_id = message.from_user.id
         text = message.text.strip()
 
@@ -1190,6 +1218,9 @@ def _register_handlers(app: Client):
         )
 
         all_buttons = []
+        # ponytail: one category_pricing query for the whole page instead of
+        # one per session. Unpriced sessions come back as None, same as before.
+        prices = await db.get_session_prices(sessions)
         for cc in sorted(by_country.keys()):
             flag = get_country_flag(cc)
             for s in by_country[cc]:
@@ -1198,7 +1229,7 @@ def _register_handlers(app: Client):
                 acc_year = s.get("account_year")
                 acc_month = s.get("account_month")
                 year_str = f" ~{format_account_year(acc_year, acc_month)}" if acc_year else ""
-                p = await db.get_session_price(s)
+                p = prices.get(phone)
                 price_str = f"{p} cr" if p is not None else "No price"
                 all_buttons.append([InlineKeyboardButton(
                     f"{status_icon} {flag} {phone}{year_str} — {price_str}",
@@ -2243,9 +2274,11 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
 
         sessions = await db.get_active_sessions()
+        # ponytail: batch pricing — one query for all sessions, not one each.
+        prices = await db.get_session_prices(sessions)
         by_country = {}
         for s in sessions:
-            p = await db.get_session_price(s)
+            p = prices.get(s["phone_number"])
             if p is None:
                 continue
             eff = apply_discount(p, offer)
@@ -2314,10 +2347,12 @@ def _register_handlers(app: Client):
         credits = await db.get_credits(cq.from_user.id)
 
         sessions = await db.get_active_sessions_by_country(cc)
+        # ponytail: batch pricing — one query for all sessions, not one each.
+        prices = await db.get_session_prices(sessions)
         valid_sessions = []
         session_prices = []   # effective (discounted) prices
         for s in sessions:
-            p = await db.get_session_price(s)
+            p = prices.get(s["phone_number"])
             if p is not None:
                 eff = apply_discount(p, offer)
                 # A zero-balance user can never get a number free — floor to 1.
@@ -3032,6 +3067,7 @@ def _register_handlers(app: Client):
 
     @app.on_message(filters.successful_payment)
     async def on_successful_payment(_, message: Message):
+        db.begin_user_cache()
         sp = message.successful_payment
         if not sp or not sp.invoice_payload or not sp.invoice_payload.startswith("stars:"):
             return

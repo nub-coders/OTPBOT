@@ -1,5 +1,6 @@
 import motor.motor_asyncio
 import uuid
+import contextvars
 from datetime import datetime, timezone, timedelta
 from pymongo.errors import DuplicateKeyError
 from config import MONGODB_URI, ADMIN_IDS, MODERATOR_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
@@ -8,11 +9,38 @@ from utils import detect_country
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client.otpbot
 
+# ponytail: per-task user cache. The verified decorator pre-fetches user once,
+# then get_user / get_credits / is_admin / is_verified etc all hit this cache
+# instead of ~7 separate Mongo round-trips per action.
+_user_cache: contextvars.ContextVar[dict[int, dict | None] | None] = contextvars.ContextVar('_user_cache', default=None)
+
 
 # ── Users ──
 
+def _invalidate_user_cache(telegram_id: int):
+    """Drop a user from the per-task cache so the next read refetches.
+    Must be called by every write that changes a users document, otherwise a
+    later read in the same action returns pre-write credits/balance."""
+    c = _user_cache.get()
+    if c is not None:
+        c.pop(telegram_id, None)
+
+
+def begin_user_cache():
+    """Start a fresh per-task user cache. Called once per handler invocation."""
+    _user_cache.set({})
+
+
 async def get_user(telegram_id: int):
-    return await db.users.find_one({"telegram_id": telegram_id})
+    # ponytail: ctx-var cache — returns the same dict instance as the cache
+    # owner fetched, so subsequent writes invalidate via _invalidate_user_cache.
+    c = _user_cache.get()
+    if c is not None and telegram_id in c:
+        return c[telegram_id]
+    doc = await db.users.find_one({"telegram_id": telegram_id})
+    if c is not None:
+        c[telegram_id] = doc
+    return doc
 
 
 async def create_user(telegram_id: int, username: str, first_name: str, role: str = "user", referred_by: int = None):
@@ -33,6 +61,7 @@ async def create_user(telegram_id: int, username: str, first_name: str, role: st
         {"$setOnInsert": doc},
         upsert=True,
     )
+    _invalidate_user_cache(telegram_id)
     return doc
 
 
@@ -41,6 +70,7 @@ async def set_user_role(telegram_id: int, role: str):
         {"telegram_id": telegram_id},
         {"$set": {"role": role}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def is_moderator(telegram_id: int) -> bool:
@@ -88,6 +118,7 @@ async def mark_verified(telegram_id: int):
         {"telegram_id": telegram_id},
         {"$set": {"verified": True}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def create_verify_token(telegram_id: int, token: str, ttl_seconds: int = 600):
@@ -125,6 +156,7 @@ async def add_credits(telegram_id: int, amount: int):
         {"telegram_id": telegram_id},
         {"$inc": {"credits": amount}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def get_balance(telegram_id: int) -> int:
@@ -150,6 +182,10 @@ async def deduct_funds_for_purchase(telegram_id: int, amount: int) -> tuple[bool
     deducts the remainder from withdrawable `balance`.
     Returns (success, credits_deducted, balance_deducted).
     """
+    # ponytail: invalidate first so get_user returns the real credits/balance
+    # for the split computation, not a stale cached copy from the action's
+    # pre-read. The conditional update is itself the atomic gate.
+    _invalidate_user_cache(telegram_id)
     user = await get_user(telegram_id)
     if not user:
         return False, 0, 0
@@ -177,6 +213,7 @@ async def deduct_funds_for_purchase(telegram_id: int, amount: int) -> tuple[bool
             query["balance"] = {"$gte": balance_deducted}
 
         res = await db.users.update_one(query, {"$inc": inc})
+        _invalidate_user_cache(telegram_id)
         if res.modified_count == 0:
             return False, 0, 0
 
@@ -195,6 +232,7 @@ async def restore_purchase_funds(telegram_id: int, credits_amount: int = 0, bala
             {"telegram_id": telegram_id},
             {"$inc": inc},
         )
+        _invalidate_user_cache(telegram_id)
 
 
 
@@ -227,6 +265,7 @@ async def consume_offer(telegram_id: int):
         {"telegram_id": telegram_id},
         {"$set": {"offer.used": True}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
@@ -259,6 +298,7 @@ async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: 
         {"telegram_id": telegram_id},
         update_doc,
     )
+    _invalidate_user_cache(telegram_id)
     return was_used
 
 
@@ -302,6 +342,7 @@ async def set_offer(telegram_id: int, credits: int, duration_hours: float):
         {"telegram_id": telegram_id},
         {"$set": {"offer": offer}},
     )
+    _invalidate_user_cache(telegram_id)
     return offer
 
 
@@ -434,6 +475,7 @@ async def mark_session_sold(phone_number: str, sold_to: int, price: int = 0, ord
                         {"$inc": {"seller_earned_total": payout, "balance": payout}},
                         session=s,
                     )
+                    _invalidate_user_cache(seller_id)
                     paid = True
         if paid:
             # Notify the seller that their account was just purchased.
@@ -936,6 +978,45 @@ async def ensure_indexes():
     await db.withdrawal_requests.create_index("created_at")
     await db.payments.create_index("created_at")
 
+    # Hot lookup keys. Every one of these backs a find_one/update_one that runs
+    # on the request path — without them Mongo collection-scans on every action.
+    #
+    # users.telegram_id is unique: create_user upserts on it, so a duplicate is
+    # always a bug. Built non-unique if legacy dupes already exist (see below)
+    # rather than failing startup.
+    try:
+        await db.users.create_index("telegram_id", unique=True, name="uniq_user_telegram_id")
+    except Exception:
+        # Pre-existing duplicates block the unique build. Fall back to a plain
+        # index so lookups are still fast, and surface the dupes for cleanup.
+        await db.users.create_index("telegram_id", name="user_telegram_id")
+        dupes = await db.users.aggregate([
+            {"$group": {"_id": "$telegram_id", "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}},
+        ]).to_list(None)
+        print(f"WARNING: users.telegram_id not unique — duplicate ids: "
+              f"{[d['_id'] for d in dupes]}")
+
+    # sessions.phone_number is the document identity (save_session upserts on it).
+    await db.sessions.create_index("phone_number", unique=True, name="uniq_session_phone")
+    # order_id is sparse: only sold/assigned sessions carry one, and unset docs
+    # would otherwise collide under a unique index.
+    await db.sessions.create_index("order_id", sparse=True, name="session_order_id")
+    await db.active_assignments.create_index("order_id", name="assignment_order_id")
+    await db.pending_payments.create_index("qr_id", unique=True, name="uniq_pending_qr_id")
+    await db.sell_listings.create_index("phone_number", name="listing_phone")
+    # get_category_price matches on all three fields — compound covers it exactly,
+    # and unique keeps set_category_price's upsert from racing into duplicates.
+    await db.category_pricing.create_index(
+        [("country_code", 1), ("year", 1), ("email_added", 1)],
+        unique=True,
+        name="uniq_category_pricing",
+    )
+    # get_user_otps filters by requested_by, sorts by created_at desc.
+    await db.otps.create_index([("requested_by", 1), ("created_at", -1)], name="otp_user_recent")
+    # get_user_payments filters by user_id, sorts by created_at desc.
+    await db.payments.create_index([("user_id", 1), ("created_at", -1)], name="payment_user_recent")
+
 
 async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
     """Record an auth failure / auto-unlist event so it can be counted in stats."""
@@ -1095,8 +1176,40 @@ async def get_session_price(session: dict) -> int | None:
     cc = session.get("country_code", "XX")
     year = session.get("account_year")
     email_added = session.get("email_added", False)
-    
+
     return await get_category_price(cc, year, email_added)
+
+
+def _pricing_key(session: dict) -> tuple:
+    """Category-pricing key for a session. Must match get_category_price's
+    normalisation (year defaults to 2025, email_added coerced to bool)."""
+    return (
+        session.get("country_code", "XX"),
+        session.get("account_year") if session.get("account_year") is not None else 2025,
+        bool(session.get("email_added", False)),
+    )
+
+
+async def get_session_prices(sessions: list[dict]) -> dict[str, int | None]:
+    """Batch equivalent of get_session_price for a list of sessions.
+    One query for the whole list instead of one per session.
+    Returns {phone_number: price_or_None}."""
+    if not sessions:
+        return {}
+
+    keys = {_pricing_key(s) for s in sessions}
+    docs = await db.category_pricing.find({
+        "$or": [
+            {"country_code": cc, "year": y, "email_added": e}
+            for cc, y, e in keys
+        ]
+    }).to_list(None)
+
+    by_key = {
+        (d["country_code"], d["year"], d["email_added"]): d["price"]
+        for d in docs
+    }
+    return {s["phone_number"]: by_key.get(_pricing_key(s)) for s in sessions}
 
 
 # ── Referrals ──
@@ -1120,6 +1233,7 @@ async def add_referral_earning(telegram_id: int, amount: int):
         {"telegram_id": telegram_id},
         {"$inc": {"referral_earned": amount, "credits": amount}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def has_made_purchase(telegram_id: int) -> bool:
@@ -1131,6 +1245,7 @@ async def mark_referral_rewarded(telegram_id: int):
         {"telegram_id": telegram_id},
         {"$set": {"referral_verify_rewarded": True}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 async def is_referral_rewarded(telegram_id: int) -> bool:
@@ -1144,6 +1259,7 @@ async def add_referral_withdrawable_earning(telegram_id: int, amount: int):
         {"telegram_id": telegram_id},
         {"$inc": {"referral_earned": amount, "balance": amount}},
     )
+    _invalidate_user_cache(telegram_id)
 
 
 
@@ -1488,6 +1604,7 @@ async def create_withdrawal_request(seller_id: int, amount: int, method: str, de
         {"telegram_id": seller_id, "balance": {"$gte": amount}},
         {"$inc": {"balance": -amount}},
     )
+    _invalidate_user_cache(seller_id)
     if result.modified_count == 0:
         return {}   # not enough balance
     result2 = await db.withdrawal_requests.insert_one(doc)
@@ -1589,6 +1706,7 @@ async def mark_withdrawal_rejected(withdrawal_id, reason: str = "") -> dict | No
             {"telegram_id": doc["seller_id"]},
             {"$inc": {"balance": doc["amount"]}},
         )
+        _invalidate_user_cache(doc["seller_id"])
     return doc
 
 
