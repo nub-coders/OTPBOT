@@ -469,18 +469,22 @@ async def _change_password(client: Client, phone: str, old_password: str, new_pa
 
 
 
-async def _change_login_email(client: Client, phone: str) -> bool:
+async def _change_login_email(client: Client, phone: str) -> str | None:
     """Switch the account's login email to NEW_LOGIN_EMAIL.
 
     Only meaningful when a login email is ALREADY configured; the caller must check.
-    Returns True on verified success.
+    Returns None on success, or an error message string on failure.
     """
+    if not NEW_LOGIN_EMAIL:
+        log.error("[%s] NEW_LOGIN_EMAIL is not configured", phone)
+        return "NEW_LOGIN_EMAIL not configured"
+
     purpose = raw_types.EmailVerifyPurposeLoginChange()
     try:
         await client.invoke(raw_fn.account.SendVerifyEmailCode(purpose=purpose, email=NEW_LOGIN_EMAIL))
     except Exception as e:
         log.error("[%s] SendVerifyEmailCode failed: %s", phone, e)
-        return False
+        return f"SendVerifyEmailCode failed: {e}"
 
     otp_code = None
     sent_at = time.time()
@@ -493,7 +497,7 @@ async def _change_login_email(client: Client, phone: str) -> bool:
 
     if not otp_code:
         log.error("[%s] Timed out waiting for email OTP to %s", phone, NEW_LOGIN_EMAIL)
-        return False
+        return f"Timed out waiting for email OTP to {NEW_LOGIN_EMAIL}"
 
     try:
         await client.invoke(raw_fn.account.VerifyEmail(
@@ -502,16 +506,16 @@ async def _change_login_email(client: Client, phone: str) -> bool:
         ))
     except Exception as e:
         log.error("[%s] VerifyEmail failed: %s", phone, e)
-        return False
+        return f"VerifyEmail failed: {e}"
 
     try:
         pwd_info = await client.invoke(raw_fn.account.GetPassword())
         new_pattern = getattr(pwd_info, "login_email_pattern", None)
         log.info("[%s] Login email switched — new pattern: %s", phone, new_pattern)
-        return True
+        return None
     except Exception as e:
         log.warning("[%s] Could not re-check login email after verify: %s", phone, e)
-        return True  # verify succeeded; re-check is best-effort
+        return None  # verify succeeded; re-check is best-effort
 
 
 async def secure_purchased_account(phone: str, session_string: str, old_password: str = "") -> dict:
@@ -563,10 +567,11 @@ async def secure_purchased_account(phone: str, session_string: str, old_password
 
         # 2. Switch login email only if one already exists.
         if result["email_present"]:
-            if await _change_login_email(client, phone):
+            email_err = await _change_login_email(client, phone)
+            if email_err is None:
                 result["email_changed"] = True
             else:
-                result["error"] = result["error"] or "email change failed"
+                result["error"] = result["error"] or email_err
         else:
             log.info("[%s] No login email present — skipping email switch", phone)
     finally:

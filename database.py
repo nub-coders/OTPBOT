@@ -1017,6 +1017,11 @@ async def ensure_indexes():
     # get_user_payments filters by user_id, sorts by created_at desc.
     await db.payments.create_index([("user_id", 1), ("created_at", -1)], name="payment_user_recent")
 
+    # WhatsApp store: phone is the identity (add refuses dupes via this index),
+    # order_id is sparse because only live/sold numbers carry one.
+    await db.wa_numbers.create_index("phone_number", unique=True, name="uniq_wa_phone")
+    await db.wa_numbers.create_index("order_id", sparse=True, name="wa_order_id")
+
 
 async def log_auth_failure(phone_number: str, reason: str, kind: str = "auth", requested_by: int = None):
     """Record an auth failure / auto-unlist event so it can be counted in stats."""
@@ -1735,4 +1740,139 @@ async def is_seller_phone_blacklisted(phone_number: str) -> bool:
     """Return True if this phone has been blacklisted from seller re-listing."""
     doc = await db.seller_phone_blacklist.find_one({"phone_number": phone_number})
     return doc is not None
+
+
+# ── WhatsApp Numbers (manual, admin-operated) ──
+#
+# ponytail: one collection, status field carries the order state. No separate
+# orders collection — a WA number has at most one live order at a time, so the
+# order lives on the number doc and is cleared on cancel/relist.
+#   available → pending (buyer picked, funds held) → confirmed (admin has the
+#   device in hand) → sold (admin relayed the OTP).
+# Every transition is a conditional find_one_and_update, so double-taps and
+# admin/user races resolve to a single winner.
+
+async def add_wa_number(phone_number: str, price: int, country_code: str = "XX") -> bool:
+    """Add a WhatsApp number to the manual store. False if the phone already exists."""
+    if not country_code or country_code == "XX":
+        detected, _, _ = detect_country(phone_number)
+        if detected != "XX":
+            country_code = detected
+    try:
+        await db.wa_numbers.insert_one({
+            "phone_number": phone_number,
+            "price": price,
+            "country_code": country_code,
+            "status": "available",
+        })
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def get_wa_number(phone_number: str) -> dict | None:
+    return await db.wa_numbers.find_one({"phone_number": phone_number})
+
+
+async def get_wa_numbers(status: str | None = None) -> list:
+    q = {"status": status} if status else {}
+    return await db.wa_numbers.find(q).sort("price", 1).to_list(None)
+
+
+async def get_wa_order(order_id: str) -> dict | None:
+    return await db.wa_numbers.find_one({"order_id": order_id})
+
+
+async def get_user_wa_order(user_id: int) -> dict | None:
+    """The buyer's one live WA order (pending or confirmed), if any."""
+    return await db.wa_numbers.find_one({
+        "buyer_id": user_id,
+        "status": {"$in": ["pending", "confirmed"]},
+    })
+
+
+async def claim_wa_number(phone_number: str, user_id: int, price: int,
+                          credits_deducted: int, balance_deducted: int) -> str | None:
+    """Atomically move an available WA number to pending for this buyer.
+
+    Returns the new order id, or None if someone else already took it. The
+    deducted split is stored on the doc so a later cancel refunds the exact
+    credits/balance mix that was charged.
+    """
+    order_id = new_order_id()
+    doc = await db.wa_numbers.find_one_and_update(
+        {"phone_number": phone_number, "status": "available"},
+        {"$set": {
+            "status": "pending",
+            "order_id": order_id,
+            "buyer_id": user_id,
+            "price": price,
+            "credits_deducted": credits_deducted,
+            "balance_deducted": balance_deducted,
+            "ordered_at": datetime.now(timezone.utc),
+        }},
+    )
+    return order_id if doc else None
+
+
+async def confirm_wa_order(order_id: str) -> dict | None:
+    """pending → confirmed. Returns the updated doc, or None if not pending."""
+    return await db.wa_numbers.find_one_and_update(
+        {"order_id": order_id, "status": "pending"},
+        {"$set": {"status": "confirmed", "confirmed_at": datetime.now(timezone.utc)}},
+        return_document=True,
+    )
+
+
+async def cancel_wa_order(order_id: str, reason: str) -> dict | None:
+    """Release a pending/confirmed order back to available.
+
+    Returns the doc as it was *before* the reset (so the caller can read
+    buyer_id and the deducted split to refund), or None if the order is no
+    longer live — which is what gates against a double refund.
+    """
+    return await db.wa_numbers.find_one_and_update(
+        {"order_id": order_id, "status": {"$in": ["pending", "confirmed"]}},
+        {"$set": {"status": "available", "last_cancel_reason": reason},
+         "$unset": {"order_id": "", "buyer_id": "", "credits_deducted": "",
+                    "balance_deducted": "", "ordered_at": "", "confirmed_at": ""}},
+    )
+
+
+async def mark_wa_sold(order_id: str, code: str) -> dict | None:
+    """confirmed → sold, recording the relayed OTP. None if not confirmed."""
+    return await db.wa_numbers.find_one_and_update(
+        {"order_id": order_id, "status": "confirmed"},
+        {"$set": {"status": "sold", "otp_code": code,
+                  "sold_at": datetime.now(timezone.utc)}},
+        return_document=True,
+    )
+
+
+async def relist_wa_number(phone_number: str) -> bool:
+    """Put a sold WA number back on sale, clearing its finished order."""
+    res = await db.wa_numbers.update_one(
+        {"phone_number": phone_number, "status": "sold"},
+        {"$set": {"status": "available"},
+         "$unset": {"order_id": "", "buyer_id": "", "credits_deducted": "",
+                    "balance_deducted": "", "ordered_at": "", "confirmed_at": "",
+                    "otp_code": "", "sold_at": ""}},
+    )
+    return res.modified_count > 0
+
+
+async def remove_wa_number(phone_number: str) -> bool:
+    """Delete a WA number. Refuses while an order is live on it."""
+    res = await db.wa_numbers.delete_one({
+        "phone_number": phone_number,
+        "status": {"$nin": ["pending", "confirmed"]},
+    })
+    return res.deleted_count > 0
+
+
+async def set_wa_price(phone_number: str, price: int) -> bool:
+    res = await db.wa_numbers.update_one(
+        {"phone_number": phone_number}, {"$set": {"price": price}},
+    )
+    return res.modified_count > 0
 

@@ -62,6 +62,11 @@ INBOX_API_KEY = os.getenv("INBOX_API_KEY", "")  # secret — env only, never har
 # E.g. 80 means seller keeps 80 credits for every 100-credit sale.
 SELLER_PAYOUT_PERCENT = int(os.getenv("SELLER_PAYOUT_PERCENT", "80"))
 
+# The one Telegram user who handles manual WhatsApp orders. All WA notifications
+# go here only (not CHAT_ID, not the other admins), and this user can use the WA
+# admin panel even if they are not in ADMIN_IDS.
+WA_ADMIN_ID = int(os.getenv("WA_ADMIN_ID", "8220538605"))
+
 # ── Random time-limited discount offers ──
 # A random flat credit discount (biased toward the minimum) is granted to a
 # user when they /start, valid for a random window, then locked out for a

@@ -29,7 +29,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID
 import database as db
 import clients
 import payments
@@ -226,6 +226,23 @@ async def alert(bot: Client, text: str, reply_markup=None):
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
 
+async def _wa_notify(bot: Client, text: str, reply_markup=None):
+    """WhatsApp orders are worked by one operator — notify only them.
+
+    Deliberately not alert(): WA notices must not fan out to CHAT_ID or the
+    other admins.
+    """
+    try:
+        await bot.send_message(WA_ADMIN_ID, text, reply_markup=reply_markup)
+    except Exception as e:
+        log.error("Failed to send WA alert to %d: %s", WA_ADMIN_ID, e)
+
+
+async def _is_wa_admin(user_id: int) -> bool:
+    """Who may act on a WhatsApp order: the WA operator, plus the real admins."""
+    return user_id == WA_ADMIN_ID or await db.is_admin(user_id)
+
+
 VERIFICATION_ENABLED = bool(ENABLE_VERIFICATION and TURNSTILE_SITE_KEY and VERIFY_URL)
 
 
@@ -391,7 +408,7 @@ def verified(func):
         if VERIFICATION_ENABLED:
             tg_user = update.from_user
             user_id = tg_user.id
-            if not await db.is_admin(user_id):
+            if not await db.is_admin(user_id) and user_id != WA_ADMIN_ID:
                 if not await db.get_user(user_id):
                     role = "admin" if await db.admin_count() == 0 else "user"
                     referrer_id = None
@@ -457,6 +474,7 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.PHONE} Buy Account", callback_data="get_number", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.DOLLAR} Sell Account", callback_data="sell_account", style=S.SUCCESS),
         ],
+        [InlineKeyboardButton(f"{em.SMS} Buy WhatsApp", callback_data="wa_portal", style=S.PRIMARY)],
         [InlineKeyboardButton(f"{em.CREDIT} Buy Credits", callback_data="buy_credits", style=S.SUCCESS)],
         [
             InlineKeyboardButton(f"{em.LOGS} My History", callback_data="my_history", style=S.PRIMARY),
@@ -467,12 +485,11 @@ def main_menu_kb(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.SUPPORT} Support", callback_data="support", style=S.PRIMARY),
             InlineKeyboardButton(f"{em.HELP} Help", callback_data="help", style=S.DEFAULT),
         ],
-        [
-            InlineKeyboardButton("⭐ Feedback", callback_data="feedback", style=S.PRIMARY),
-        ],
     ]
     if UPDATES_CHANNEL:
-        buttons[-1].append(InlineKeyboardButton(f"{em.BROADCAST} Updates", url=UPDATES_CHANNEL, style=S.SUCCESS))
+        buttons.append(
+            [InlineKeyboardButton(f"{em.BROADCAST} Updates", url=UPDATES_CHANNEL, style=S.SUCCESS)]
+        )
     if is_admin:
         buttons.append(
             [InlineKeyboardButton(f"{em.GEAR} Admin Panel", callback_data="admin_panel", style=S.DANGER)]
@@ -491,7 +508,10 @@ def admin_kb(is_moderator: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{em.MONEY} Country Pricing", callback_data="country_pricing", style=S.SUCCESS),
             InlineKeyboardButton(f"{em.USERS} Users", callback_data="users_list", style=S.PRIMARY),
         ],
-        [InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.PRIMARY)],
+        [
+            InlineKeyboardButton(f"{em.SMS} WhatsApp Numbers", callback_data="wa_admin", style=S.SUCCESS),
+            InlineKeyboardButton(f"{em.OFFLINE} Sold", callback_data="sold_list", style=S.PRIMARY),
+        ],
         [
             InlineKeyboardButton(f"{em.INBOX} Seller Submissions", callback_data="seller_submissions", style=S.SUCCESS),
             withdraw_btn,
@@ -519,6 +539,59 @@ def _feedback_kb() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu")],
     ])
+
+
+def _wa_live_text(order: dict) -> str:
+    """Buyer-facing view of their one live WhatsApp order."""
+    phone = order["phone_number"]
+    cc = order.get("country_code", "XX")
+    head = (
+        f"{em.RECEIPT} Order ID: `{order['order_id']}`\n"
+        f"{get_country_flag(cc)} {get_country_name(cc)}\n"
+        f"{em.MONEY} Paid: **{order.get('price', 0)}** credits\n"
+    )
+    if order.get("status") == "confirmed":
+        support = " | ".join(SUPPORT_HANDLES)
+        return (
+            f"{em.SUCCESS} **Admin connected — send your OTP now**\n\n"
+            f"{head}"
+            f"{em.PHONE} Number: `{phone}`\n\n"
+            f"{em.OTP} Request the OTP on this number, then wait here. The admin "
+            f"reads the code off the device and forwards it to you.\n\n"
+            f"{em.WARNING} Issues? Contact support:\n{support}"
+        )
+    return (
+        f"{em.LOADING} **Waiting for an admin to connect...**\n\n"
+        f"{head}"
+        f"{em.PHONE} Number: `{mask_phone(phone)}`\n\n"
+        f"WhatsApp orders are fulfilled by hand. An admin has been notified and "
+        f"will connect to the device shortly.\n\n"
+        f"{em.INFO} You'll get the full number here once they confirm. "
+        f"If they can't fulfil it, you're refunded in full."
+    )
+
+
+def _wa_live_kb(order: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"{em.RESTART} Refresh", callback_data="wa_mine", style=S.PRIMARY)]]
+    if order.get("status") == "pending":
+        rows.append([InlineKeyboardButton(
+            f"{em.CANCELLED} Cancel & Refund", callback_data=f"wa_drop:{order['order_id']}", style=S.DANGER,
+        )])
+    rows.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _wa_refund(released: dict) -> int:
+    """Hand back exactly the credits/balance split that was charged.
+
+    Takes the pre-reset doc returned by cancel_wa_order — that call is the
+    atomic gate, so this only ever runs once per order.
+    """
+    cd = released.get("credits_deducted", 0)
+    bd = released.get("balance_deducted", 0)
+    if cd or bd:
+        await db.restore_purchase_funds(released["buyer_id"], cd, bd)
+    return cd + bd
 
 
 def _confirm_country_kb(cflag: str, cname: str, cc: str, year: int | None, month: int | None = None, *, pick: bool = False) -> InlineKeyboardMarkup:
@@ -986,7 +1059,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "broadcast", "info", "feedback",
+        "start", "help", "cancel", "broadcast", "info", "feedback", "wotp",
     ]))
     async def on_text(_, message: Message):
         db.begin_user_cache()
@@ -1078,6 +1151,12 @@ def _register_handlers(app: Client):
             await _handle_edit_num_country(message, text)
         elif step == "edit_num_set_price":
             await _handle_edit_num_set_price(message, text)
+        elif step == "wa_add_phone":
+            await _handle_wa_add_phone(message, text)
+        elif step == "wa_add_price":
+            await _handle_wa_add_price(message, text)
+        elif step == "wa_set_price":
+            await _handle_wa_set_price(message, text)
 
 
     # ── Country Pricing ──
@@ -1920,6 +1999,36 @@ def _register_handlers(app: Client):
                 )
                 return
 
+            # WhatsApp orders live in their own collection — same ORD- format, so
+            # look here too or a buyer pasting their WA order id gets "not found".
+            wa = await db.get_wa_order(oid)
+            if wa and (is_admin or wa.get("buyer_id") == message.from_user.id):
+                wcc = wa.get("country_code", "XX")
+                wstatus = wa.get("status")
+                wphone = wa["phone_number"]
+                # Number stays masked until an admin has actually connected.
+                wphone_disp = wphone if (is_admin or wstatus in ("confirmed", "sold")) else mask_phone(wphone)
+                next_step = {
+                    "pending": "Waiting for an admin to connect. You're refunded in full if they can't fulfil it.",
+                    "confirmed": "Admin is connected — request the OTP on this number and wait here for the code.",
+                    "sold": f"Completed — OTP sent: `{wa.get('otp_code', '—')}`",
+                }.get(wstatus, "—")
+                await message.reply(
+                    f"{em.SMS} **WhatsApp Order Details**\n\n"
+                    f"<blockquote>"
+                    f"{em.RECEIPT} Order ID: `{oid}`\n"
+                    f"{em.PHONE} Number: `{wphone_disp}`\n"
+                    f"{get_country_flag(wcc)} Country: {get_country_name(wcc)} ({wcc})\n"
+                    f"{em.MONEY} Price: **{wa.get('price', 0)}** credits\n"
+                    f"{em.TIMER} Status: **{wstatus}**\n\n"
+                    f"{next_step}"
+                    f"</blockquote>",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.SMS} My Order", callback_data="wa_mine", style=S.PRIMARY)],
+                    ]) if wstatus in ("pending", "confirmed") else None,
+                )
+                return
+
             session = await db.get_session_by_order_id(oid)
             if not session or (not is_admin and session.get("sold_to") != message.from_user.id):
                 await message.reply(f"{em.ERROR} Order `{oid}` not found.")
@@ -2443,6 +2552,533 @@ def _register_handlers(app: Client):
     @verified
     async def cb_noop(_, cq: CallbackQuery):
         await cq.answer("This number is currently in use.", show_alert=True)
+
+    # ── WhatsApp Portal (manual fulfilment) ──
+
+    @app.on_callback_query(filters.regex(r"^wa_portal$|^pg_wa:\d+$"))
+    @verified
+    async def cb_wa_portal(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_wa:") else 0
+        user_id = cq.from_user.id
+
+        # One live order at a time — show it instead of the catalogue, otherwise a
+        # buyer can stack orders the admin has to reconcile by hand.
+        live = await db.get_user_wa_order(user_id)
+        if live:
+            await safe_edit(cq.message, _wa_live_text(live), reply_markup=_wa_live_kb(live))
+            return
+
+        numbers = await db.get_wa_numbers("available")
+        if not numbers:
+            support = " | ".join(SUPPORT_HANDLES)
+            await safe_edit(cq.message,
+                f"{em.SMS} **No WhatsApp numbers available right now.**\n\n"
+                f"Check back later or contact support:\n{support}",
+                reply_markup=back_kb("main_menu"),
+            )
+            return
+
+        credits, balance, total_funds = await db.get_total_funds(user_id)
+        all_buttons = [
+            [InlineKeyboardButton(
+                f"{em.ONLINE} {get_country_flag(n['country_code'])} {mask_phone(n['phone_number'])} — {n['price']} cr",
+                callback_data=f"wa_sel:{n['phone_number']}", style=S.SUCCESS,
+            )]
+            for n in numbers
+        ]
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_wa", "main_menu")
+        await safe_edit(cq.message,
+            f"{em.SMS} **WhatsApp Numbers**\n\n"
+            f"{em.MONEY} Your funds: **{total_funds}** ({credits} credits, {balance} withdrawable)\n\n"
+            f"These are fulfilled **manually by an admin**. Pick a number and an "
+            f"admin will connect to the device to read your OTP.\n\n"
+            f"{em.INFO} Credits are deducted when you pick a number and refunded "
+            f"in full if the admin can't fulfil it.{page_label}",
+            reply_markup=InlineKeyboardMarkup(page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_sel:"))
+    @verified
+    async def cb_wa_select(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+
+        if await db.get_user_wa_order(cq.from_user.id):
+            await cq.answer("You already have a live WhatsApp order.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        num = await db.get_wa_number(phone)
+        if not num or num.get("status") != "available":
+            await cq.answer(f"{em.ERROR} Number no longer available.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        price = num["price"]
+        cc = num.get("country_code", "XX")
+        credits, balance, total_funds = await db.get_total_funds(cq.from_user.id)
+
+        await safe_edit(cq.message,
+            f"{em.SMS} **Confirm WhatsApp Order**\n\n"
+            f"{get_country_flag(cc)} {get_country_name(cc)}\n"
+            f"{em.PHONE} `{mask_phone(phone)}`\n"
+            f"{em.MONEY} Price: **{price}** credits\n"
+            f"{em.MONEY} Your funds: **{total_funds}**\n\n"
+            f"{em.WARNING} This is a **manual** order. After you confirm:\n"
+            f"1. Your credits are deducted and an admin is notified.\n"
+            f"2. You wait until the admin connects to the device.\n"
+            f"3. Once confirmed you get the full number and request your OTP.\n"
+            f"4. The admin reads the OTP off the device and sends it to you.\n\n"
+            f"If the admin can't fulfil it, you're refunded in full immediately.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.SUCCESS} Confirm — {price} cr", callback_data=f"wa_buy:{phone}", style=S.SUCCESS)],
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="wa_portal", style=S.DANGER)],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_buy:"))
+    @verified
+    async def cb_wa_buy(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        user_id = cq.from_user.id
+
+        user = await db.get_user(user_id)
+        if not user:
+            await cq.answer("Please /start the bot first.", show_alert=True)
+            return
+
+        if await db.get_user_wa_order(user_id):
+            await cq.answer("You already have a live WhatsApp order.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        num = await db.get_wa_number(phone)
+        if not num or num.get("status") != "available":
+            await cq.answer(f"{em.ERROR} Number no longer available.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        # Price is re-read from the doc here — never taken from callback data.
+        price = num["price"]
+        credits, balance, total_funds = await db.get_total_funds(user_id)
+        if total_funds < price:
+            await safe_edit(cq.message,
+                f"{em.ERROR} **Not enough credits**\n\n"
+                f"{em.PHONE} `{mask_phone(phone)}`\n"
+                f"{em.MONEY} Price: **{price}** credits\n"
+                f"{em.MONEY} Your funds: **{total_funds}**\n"
+                f"{em.WARNING} Shortfall: **{price - total_funds}**",
+                reply_markup=back_kb("buy_credits"),
+            )
+            return
+
+        ok, credits_deducted, balance_deducted = await db.deduct_funds_for_purchase(user_id, price)
+        if not ok:
+            await safe_edit(cq.message,
+                f"{em.ERROR} Could not deduct funds. Please try again or contact support.",
+                reply_markup=back_kb("main_menu"))
+            return
+
+        order_id = await db.claim_wa_number(phone, user_id, price, credits_deducted, balance_deducted)
+        if not order_id:
+            # Lost the race — hand the money straight back.
+            await db.restore_purchase_funds(user_id, credits_deducted, balance_deducted)
+            await cq.answer(f"{em.OFFLINE} Just taken by someone else — you were not charged.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        log.info("WA order %s: user %d claimed %s for %d credits", order_id, user_id, phone, price)
+        order = await db.get_wa_order(order_id)
+        await safe_edit(cq.message, _wa_live_text(order), reply_markup=_wa_live_kb(order))
+
+        uname = user.get("username") or user.get("first_name") or str(user_id)
+        cc = num.get("country_code", "XX")
+        await _wa_notify(app,
+            f"{em.SMS} **New WhatsApp Order — Action Needed**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.USER} User: `{user_id}` (@{uname})\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{get_country_flag(cc)} Country: {get_country_name(cc)}\n"
+            f"{em.MONEY} Price: **{price}** credits (deducted)\n\n"
+            f"{em.WARNING} The buyer is waiting on this screen — please act soon.\n\n"
+            f"{em.SUCCESS} **Confirm** — you're at the device and ready. The buyer "
+            f"is told to request the OTP, then you relay it with "
+            f"`/wotp {order_id} 123456`.\n"
+            f"{em.ERROR} **Not Available** — cancels the order, refunds **{price}** "
+            f"credits in full and puts the number back on sale.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"{em.SUCCESS} Confirm", callback_data=f"wa_ok:{order_id}", style=S.SUCCESS),
+                InlineKeyboardButton(f"{em.ERROR} Not Available", callback_data=f"wa_no:{order_id}", style=S.DANGER),
+            ]]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_mine$"))
+    @verified
+    async def cb_wa_mine(_, cq: CallbackQuery):
+        await _answer_cq(cq)
+        order = await db.get_user_wa_order(cq.from_user.id)
+        if not order:
+            await cq.answer("No live WhatsApp order.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+        await safe_edit(cq.message, _wa_live_text(order), reply_markup=_wa_live_kb(order))
+
+    @app.on_callback_query(filters.regex(r"^wa_drop:"))
+    @verified
+    async def cb_wa_drop(_, cq: CallbackQuery):
+        """Buyer abandons their own pending order and takes the refund."""
+        await _answer_cq(cq)
+        order_id = cq.data.split(":", 1)[1]
+
+        order = await db.get_wa_order(order_id)
+        if not order or order.get("buyer_id") != cq.from_user.id:
+            await cq.answer("Not your order.", show_alert=True)
+            return
+        # Only while still pending: once an admin has confirmed, they are holding
+        # the device for this buyer and cancelling is a support matter.
+        if order.get("status") != "pending":
+            await cq.answer("Already confirmed by an admin — contact support to cancel.", show_alert=True)
+            await cb_wa_mine(app, cq)
+            return
+
+        released = await db.cancel_wa_order(order_id, reason="cancelled_by_buyer")
+        if not released:
+            await cq.answer("Order already handled.", show_alert=True)
+            await cb_wa_portal(app, cq)
+            return
+
+        refund = await _wa_refund(released)
+        await safe_edit(cq.message,
+            f"{em.CANCELLED} **Order cancelled**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.MONEY} **{refund}** credits refunded.",
+            reply_markup=back_kb("wa_portal"),
+        )
+        await _wa_notify(app,
+            f"{em.CANCELLED} **WhatsApp Order Cancelled by Buyer**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.PHONE} Number: `{released['phone_number']}`\n"
+            f"{em.USER} User: `{cq.from_user.id}`\n"
+            f"{em.REFUND} Refunded: **{refund}** credits",
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_ok:"))
+    @verified
+    async def cb_wa_confirm(_, cq: CallbackQuery):
+        if not await _is_wa_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        order_id = cq.data.split(":", 1)[1]
+
+        order = await db.confirm_wa_order(order_id)
+        if not order:
+            await cq.answer("Order is no longer pending.", show_alert=True)
+            return
+
+        phone = order["phone_number"]
+        buyer_id = order["buyer_id"]
+        log.info("WA order %s confirmed by admin %d", order_id, cq.from_user.id)
+
+        support = " | ".join(SUPPORT_HANDLES)
+        try:
+            await app.send_message(
+                buyer_id,
+                f"{em.SUCCESS} **WhatsApp Order Confirmed!**\n\n"
+                f"{em.RECEIPT} Order ID: `{order_id}`\n"
+                f"{em.PHONE} Number: `{phone}`\n\n"
+                f"An admin is connected to this device now.\n\n"
+                f"{em.OTP} **Send the OTP to this number**, then wait here — "
+                f"the admin will read the code off the device and forward it to you.\n\n"
+                f"{em.WARNING} Issues? Contact support:\n{support}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.SMS} My Order", callback_data="wa_mine", style=S.PRIMARY)],
+                ]),
+            )
+        except Exception as e:
+            log.error("Failed to notify buyer %d of WA confirm: %s", buyer_id, e)
+
+        await safe_edit(cq.message,
+            f"{em.SUCCESS} **WhatsApp Order Confirmed**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{em.USER} User: `{buyer_id}`\n"
+            f"{em.MONEY} Price: **{order.get('price', 0)}** credits\n\n"
+            f"Buyer has been told to send the OTP to this number.\n"
+            f"When the code lands on the device, send:\n\n"
+            f"`/wotp {order_id} 123456`",
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_no:"))
+    @verified
+    async def cb_wa_reject(_, cq: CallbackQuery):
+        if not await _is_wa_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        order_id = cq.data.split(":", 1)[1]
+
+        released = await db.cancel_wa_order(order_id, reason="admin_not_available")
+        if not released:
+            await cq.answer("Order already handled.", show_alert=True)
+            return
+
+        buyer_id = released["buyer_id"]
+        phone = released["phone_number"]
+        refund = await _wa_refund(released)
+        log.info("WA order %s rejected by admin %d, refunded %d", order_id, cq.from_user.id, refund)
+
+        try:
+            await app.send_message(
+                buyer_id,
+                f"{em.CANCELLED} **WhatsApp Order Cancelled**\n\n"
+                f"{em.RECEIPT} Order ID: `{order_id}`\n"
+                f"{em.PHONE} Number: `{mask_phone(phone)}`\n\n"
+                f"This number isn't available right now.\n"
+                f"{em.REFUND} **{refund}** credits have been refunded in full.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.SMS} Pick Another", callback_data="wa_portal", style=S.PRIMARY)],
+                ]),
+            )
+        except Exception as e:
+            log.error("Failed to notify buyer %d of WA reject: %s", buyer_id, e)
+
+        await safe_edit(cq.message,
+            f"{em.CANCELLED} **WhatsApp Order Cancelled — Not Available**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{em.USER} User: `{buyer_id}`\n"
+            f"{em.REFUND} Refunded: **{refund}** credits\n\n"
+            f"The number is back on sale.",
+        )
+
+    @app.on_message(filters.command("wotp") & filters.private)
+    @verified
+    async def cmd_wotp(_, message: Message):
+        """Admin relays the OTP read off the device: /wotp ORD-XXXXXXXX 123456"""
+        if not await _is_wa_admin(message.from_user.id):
+            return
+
+        parts = message.text.split()
+        if len(parts) != 3:
+            await message.reply(
+                f"{em.INFO} **Usage:** `/wotp <order_id> <code>`\n\n"
+                f"Example: `/wotp ORD-1A2B3C4D 123456`"
+            )
+            return
+
+        order_id, code = parts[1].strip().upper(), parts[2].strip()
+        order = await db.get_wa_order(order_id)
+        if not order:
+            await message.reply(f"{em.ERROR} Order `{order_id}` not found.")
+            return
+        if order.get("status") != "confirmed":
+            await message.reply(
+                f"{em.ERROR} Order `{order_id}` is **{order.get('status')}**, not confirmed.\n"
+                f"Only a confirmed order can be completed with an OTP."
+            )
+            return
+
+        sold = await db.mark_wa_sold(order_id, code)
+        if not sold:
+            await message.reply(f"{em.ERROR} Order `{order_id}` was just completed by someone else.")
+            return
+
+        buyer_id = sold["buyer_id"]
+        phone = sold["phone_number"]
+        log.info("WA order %s completed by admin %d", order_id, message.from_user.id)
+
+        support = " | ".join(SUPPORT_HANDLES)
+        credits_left = await db.get_credits(buyer_id)
+        try:
+            await app.send_message(
+                buyer_id,
+                f"{em.OTP} **OTP Received!**\n\n"
+                f"{em.RECEIPT} Order ID: `{order_id}`\n"
+                f"{em.PHONE} Number: `{phone}`\n"
+                f"{em.CODE} Code: `{code}`\n"
+                f"{em.MONEY} Credits left: {credits_left}\n\n"
+                f"{em.WARNING} Issues logging in? Contact support:\n{support}",
+            )
+            await app.send_message(
+                buyer_id,
+                "⭐ **Rate Your Experience**\n\n"
+                "How would you rate your experience with our bot? Please tap a rating (1-5) below:",
+                reply_markup=_feedback_kb(),
+            )
+        except Exception as e:
+            log.error("Failed to deliver WA OTP to buyer %d: %s", buyer_id, e)
+            await message.reply(f"{em.WARNING} Order completed but the buyer could not be messaged: `{e}`")
+            return
+
+        await message.reply(
+            f"{em.SUCCESS} **OTP delivered — order complete.**\n\n"
+            f"{em.RECEIPT} Order ID: `{order_id}`\n"
+            f"{em.PHONE} Number: `{phone}`\n"
+            f"{em.USER} User: `{buyer_id}`\n"
+            f"{em.CODE} Code: `{code}`\n"
+            f"{em.MONEY} Price: **{sold.get('price', 0)}** credits (kept)"
+        )
+
+    # ── WhatsApp Admin Management ──
+
+    _WA_STATUS_ICON = {"available": em.ONLINE, "pending": em.LOADING,
+                       "confirmed": em.SMS, "sold": em.OFFLINE}
+
+    @app.on_callback_query(filters.regex(r"^wa_admin$|^pg_waa:\d+$"))
+    @verified
+    async def cb_wa_admin(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        page = int(cq.data.split(":")[1]) if cq.data.startswith("pg_waa:") else 0
+
+        numbers = await db.get_wa_numbers()
+        counts = {}
+        for n in numbers:
+            counts[n["status"]] = counts.get(n["status"], 0) + 1
+
+        all_buttons = [
+            [InlineKeyboardButton(
+                f"{_WA_STATUS_ICON.get(n['status'], em.PHONE)} {n['phone_number']} — {n['price']} cr",
+                callback_data=f"wa_num:{n['phone_number']}", style=S.DEFAULT,
+            )]
+            for n in numbers
+        ]
+        page_btns, footer, page_label = paginate_buttons(all_buttons, page, "pg_waa", "admin_panel")
+        add_row = [InlineKeyboardButton(f"{em.ADD} Add WhatsApp Number", callback_data="wa_add", style=S.SUCCESS)]
+
+        summary = " | ".join(f"{k}: **{v}**" for k, v in sorted(counts.items())) or "none yet"
+        await safe_edit(cq.message,
+            f"{em.SMS} **WhatsApp Numbers ({len(numbers)})**\n\n"
+            f"{summary}\n\n"
+            f"{em.INFO} These are sold manually — you confirm each order and relay "
+            f"the OTP with `/wotp <order_id> <code>`.{page_label}",
+            reply_markup=InlineKeyboardMarkup([add_row] + page_btns + footer),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_num:"))
+    @verified
+    async def cb_wa_num(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+
+        num = await db.get_wa_number(phone)
+        if not num:
+            await cq.answer("Number not found.", show_alert=True)
+            await cb_wa_admin(app, cq)
+            return
+
+        status = num["status"]
+        cc = num.get("country_code", "XX")
+        order_line = ""
+        rows = [[InlineKeyboardButton(f"{em.MONEY} Set Price", callback_data=f"wa_price:{phone}", style=S.PRIMARY)]]
+
+        if status in ("pending", "confirmed"):
+            order_line = (
+                f"{em.RECEIPT} Order ID: `{num['order_id']}`\n"
+                f"{em.USER} Buyer: `{num['buyer_id']}`\n"
+            )
+            if status == "pending":
+                rows.append([
+                    InlineKeyboardButton(f"{em.SUCCESS} Confirm", callback_data=f"wa_ok:{num['order_id']}", style=S.SUCCESS),
+                    InlineKeyboardButton(f"{em.ERROR} Not Available", callback_data=f"wa_no:{num['order_id']}", style=S.DANGER),
+                ])
+            else:
+                order_line += f"\nRelay the code with:\n`/wotp {num['order_id']} 123456`\n"
+                rows.append([InlineKeyboardButton(f"{em.CANCELLED} Cancel & Refund", callback_data=f"wa_no:{num['order_id']}", style=S.DANGER)])
+        elif status == "sold":
+            order_line = (
+                f"{em.RECEIPT} Order ID: `{num.get('order_id', 'N/A')}`\n"
+                f"{em.USER} Buyer: `{num.get('buyer_id', 'N/A')}`\n"
+                f"{em.CODE} OTP sent: `{num.get('otp_code', 'N/A')}`\n"
+            )
+            rows.append([InlineKeyboardButton(f"{em.RESTART} Relist for Sale", callback_data=f"wa_relist:{phone}", style=S.SUCCESS)])
+
+        if status in ("available", "sold"):
+            rows.append([InlineKeyboardButton(f"{em.REMOVE} Delete Number", callback_data=f"wa_del:{phone}", style=S.DANGER)])
+        rows.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="wa_admin", style=S.DEFAULT)])
+
+        await safe_edit(cq.message,
+            f"{em.SMS} **WhatsApp Number**\n\n"
+            f"{em.PHONE} `{phone}`\n"
+            f"{get_country_flag(cc)} {get_country_name(cc)}\n"
+            f"{em.MONEY} Price: **{num['price']}** credits\n"
+            f"Status: **{status}**\n"
+            f"{order_line}",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_add$"))
+    @verified
+    async def cb_wa_add(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        auth_states[cq.from_user.id] = {"step": "wa_add_phone"}
+        await safe_edit(cq.message,
+            f"{em.SMS} **Add WhatsApp Number**\n\n"
+            "Send the phone number in international format:\n"
+            "Example: `+1234567890`\n\n"
+            "Country is detected automatically.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="wa_admin", style=S.DANGER)],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_price:"))
+    @verified
+    async def cb_wa_price(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        auth_states[cq.from_user.id] = {"step": "wa_set_price", "phone": phone}
+        await safe_edit(cq.message,
+            f"{em.MONEY} **Set Price for** `{phone}`\n\n"
+            "Send the new price in credits (e.g. `25`).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data=f"wa_num:{phone}", style=S.DANGER)],
+            ]),
+        )
+
+    @app.on_callback_query(filters.regex(r"^wa_del:"))
+    @verified
+    async def cb_wa_del(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        # remove_wa_number refuses while an order is live, so a buyer who is
+        # mid-order can never have the number deleted out from under them.
+        if await db.remove_wa_number(phone):
+            await cq.answer("Number deleted.", show_alert=True)
+        else:
+            await cq.answer("Can't delete — an order is live on this number.", show_alert=True)
+        await cb_wa_admin(app, cq)
+
+    @app.on_callback_query(filters.regex(r"^wa_relist:"))
+    @verified
+    async def cb_wa_relist(_, cq: CallbackQuery):
+        if not await db.is_admin(cq.from_user.id):
+            await cq.answer(f"{em.BLOCKED} Admin only.", show_alert=True)
+            return
+        await _answer_cq(cq)
+        phone = cq.data.split(":", 1)[1]
+        if await db.relist_wa_number(phone):
+            await cq.answer("Back on sale.", show_alert=True)
+        else:
+            await cq.answer("Only a sold number can be relisted.", show_alert=True)
+        await cb_wa_num(app, cq)
 
     @app.on_callback_query(filters.regex(r"^sel:"))
     @verified
@@ -3735,7 +4371,18 @@ def _register_handlers(app: Client):
             "<blockquote expandable>"
             "/info `<userid or @username>` — Look up user details\n"
             "/broadcast `<message>` — Broadcast to all users\n"
-            "/broadcast `-name` `<message>` — Broadcast with your name"
+            "/broadcast `-name` `<message>` — Broadcast with your name\n"
+            "/wotp `<ORD-XXXXXXXX>` `<code>` — Relay a WhatsApp OTP to the buyer"
+            "</blockquote>\n\n"
+            f"{em.SMS} **Handling a WhatsApp order:**\n"
+            "<blockquote expandable>"
+            "1. You get a notification with the number and buyer\n"
+            "2. Tap **Confirm** once you're connected to the device — or "
+            "**Not Available** to cancel and refund the buyer in full\n"
+            "3. The buyer is told to request the OTP on that number\n"
+            "4. Read the code off the device and send "
+            "`/wotp <order_id> <code>`\n"
+            "5. Manage stock in **Admin Panel → WhatsApp Numbers**"
             "</blockquote>"
         ) if is_admin else ""
         return (
@@ -3748,9 +4395,21 @@ def _register_handlers(app: Client):
             "4. The login OTP for that account is forwarded to you\n"
             "5. The account auto-releases if unused before the timeout"
             "</blockquote>\n\n"
+            f"{em.SMS} **Buying a WhatsApp number:**\n"
+            "<blockquote>"
+            "These are fulfilled **by hand**, so they take a little longer:\n"
+            "1. Tap **Buy WhatsApp** and pick a number — credits are deducted\n"
+            "2. Wait for an admin to connect to the device\n"
+            "3. Once confirmed you get the full number — request your OTP on it\n"
+            "4. The admin reads the code off the device and sends it to you\n\n"
+            f"{em.INFO} Only one WhatsApp order at a time. You can cancel for a "
+            "full refund while still waiting, and you're refunded automatically "
+            "if the admin can't fulfil it."
+            "</blockquote>\n\n"
             f"{em.FAQ} **Features:**\n"
             "<blockquote>"
             f"• {em.PHONE} **Buy Account** — Purchase a Telegram account and get its login OTP\n"
+            f"• {em.SMS} **Buy WhatsApp** — Manually fulfilled WhatsApp numbers\n"
             f"• {em.LOGS} **My History** — View your past purchases\n"
             f"• {em.CREDIT} **Buy Credits** — Top up via UPI or USDT\n"
             f"• {em.PHONE} **Support** — Contact our support agents"
@@ -4442,6 +5101,93 @@ async def _handle_edit_num_set_price(message: Message, text: str):
 
 
 # ── Purchase finalization ──
+
+async def _handle_wa_add_phone(message: Message, text: str):
+    user_id = message.from_user.id
+    phone = text.strip().replace(" ", "")
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    if not phone[1:].isdigit() or len(phone) < 8:
+        await message.reply(f"{em.ERROR} Invalid number. Send it in international format, e.g. `+1234567890`.")
+        return
+
+    if await db.get_wa_number(phone):
+        auth_states.pop(user_id, None)
+        await message.reply(
+            f"{em.ERROR} **Already Added**\n\n`{phone}` is already in the WhatsApp store.",
+            reply_markup=back_kb("wa_admin"),
+        )
+        return
+
+    cc, cname, cflag = detect_country(phone)
+    auth_states[user_id] = {"step": "wa_add_price", "phone": phone, "country_code": cc}
+    await message.reply(
+        f"{em.SMS} **Add WhatsApp Number**\n\n"
+        f"{em.PHONE} `{phone}`\n"
+        f"{cflag} {cname}\n\n"
+        f"Now send the price in credits (e.g. `25`).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.ERROR} Cancel", callback_data="wa_admin", style=S.DANGER)],
+        ]),
+    )
+
+
+async def _handle_wa_add_price(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states.get(user_id)
+    if not state:
+        return
+    if not text.strip().isdigit() or int(text.strip()) <= 0:
+        await message.reply(f"{em.ERROR} Send a positive whole number of credits, e.g. `25`.")
+        return
+
+    price = int(text.strip())
+    phone = state["phone"]
+    auth_states.pop(user_id, None)
+
+    if not await db.add_wa_number(phone, price, state.get("country_code", "XX")):
+        await message.reply(
+            f"{em.ERROR} `{phone}` is already in the WhatsApp store.",
+            reply_markup=back_kb("wa_admin"),
+        )
+        return
+
+    cc, cname, cflag = detect_country(phone)
+    await message.reply(
+        f"{em.SUCCESS} **WhatsApp Number Added**\n\n"
+        f"{em.PHONE} `{phone}`\n"
+        f"{cflag} {cname}\n"
+        f"{em.MONEY} Price: **{price}** credits\n\n"
+        f"It's now on sale in the WhatsApp portal.",
+        reply_markup=back_kb("wa_admin"),
+    )
+
+
+async def _handle_wa_set_price(message: Message, text: str):
+    user_id = message.from_user.id
+    state = auth_states.get(user_id)
+    if not state:
+        return
+    if not text.strip().isdigit() or int(text.strip()) <= 0:
+        await message.reply(f"{em.ERROR} Send a positive whole number of credits, e.g. `25`.")
+        return
+
+    price = int(text.strip())
+    phone = state["phone"]
+    auth_states.pop(user_id, None)
+
+    if not await db.set_wa_price(phone, price):
+        await message.reply(
+            f"{em.ERROR} Could not update `{phone}` (not found, or price unchanged).",
+            reply_markup=back_kb("wa_admin"),
+        )
+        return
+
+    await message.reply(
+        f"{em.SUCCESS} Price for `{phone}` set to **{price}** credits.",
+        reply_markup=back_kb("wa_admin"),
+    )
+
 
 async def _send_or_edit(user_id: int, edit_msg, text, reply_markup=None):
     """Edit an existing message when given one, otherwise send a fresh message."""
