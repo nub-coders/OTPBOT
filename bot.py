@@ -1474,8 +1474,32 @@ def _register_handlers(app: Client):
             await cq.answer("Number not found.", show_alert=True)
             return
 
-        await db.set_session_status(phone, "active")
-        await cq.answer(f"{em.SUCCESS} Number re-listed for sale!")
+        if session.get("status") == "sold":
+            await cq.answer(f"{em.ERROR} Cannot re-list a sold number.", show_alert=True)
+            return
+
+        await safe_edit(cq.message, f"{em.LOADING} Verifying `{phone}` before re-listing...")
+
+        ok, error = await clients.verify_session(phone, session["session_string"])
+        if ok:
+            await db.set_session_status(phone, "active")
+            await safe_edit(cq.message,
+                f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                ]),
+            )
+        else:
+            await db.set_session_status(phone, "error", error)
+            await safe_edit(cq.message,
+                f"{em.ERROR} `{phone}` — verification failed during re-listing.\n\n"
+                f"❗ Error: `{error[:200]}`\n\n"
+                "Would you like to re-add this number?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                ]),
+            )
 
         cc = session.get("country_code", "XX")
         flag = get_country_flag(cc)
@@ -1804,25 +1828,43 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, f"{em.LOADING} Verifying `{phone}`...")
 
         ok, error = await clients.verify_session(phone, session["session_string"])
-        if ok:
-            await db.set_session_status(phone, "active")
-            await safe_edit(cq.message,
-                f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
-                ]),
-            )
+        current_status = session.get("status")
+        if current_status == "sold":
+            if ok:
+                await safe_edit(cq.message,
+                    f"{em.SUCCESS} `{phone}` — session is **valid** (remains marked as **sold**).",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
+            else:
+                await safe_edit(cq.message,
+                    f"{em.ERROR} `{phone}` — session is **invalid** (remains marked as **sold**).\n\n"
+                    f"❗ Error: `{error[:200]}`",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
         else:
-            await db.set_session_status(phone, "error", error)
-            await safe_edit(cq.message,
-                f"{em.ERROR} `{phone}` — verification failed\n\n"
-                f"❗ Error: `{error[:200]}`\n\n"
-                "Would you like to re-add this number?",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
-                ]),
-            )
+            if ok:
+                await db.set_session_status(phone, "active")
+                await safe_edit(cq.message,
+                    f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
+            else:
+                await db.set_session_status(phone, "error", error)
+                await safe_edit(cq.message,
+                    f"{em.ERROR} `{phone}` — verification failed\n\n"
+                    f"❗ Error: `{error[:200]}`\n\n"
+                    "Would you like to re-add this number?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
 
     @app.on_callback_query(filters.regex(r"^readd:"))
     @verified
