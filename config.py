@@ -113,7 +113,9 @@ OFFER_GRANT_INTERVAL_SECONDS = int(os.getenv("OFFER_GRANT_INTERVAL_SECONDS", "30
 # COUPON_OFFER_HOURS. Codes stop working COUPON_TTL_HOURS after posting.
 # The alphabet excludes O/0/I/1 so a mistyped code cannot hit another coupon.
 COUPON_COUNT = int(os.getenv("COUPON_COUNT", "10"))
-COUPON_CODE_LENGTH = int(os.getenv("COUPON_CODE_LENGTH", "6"))
+# Floored at 6: codes are brute-forceable through the chat handler over their
+# 24h life, and a shorter code silently removes that protection.
+COUPON_CODE_LENGTH = max(6, int(os.getenv("COUPON_CODE_LENGTH", "6")))
 COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
 COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
 COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
