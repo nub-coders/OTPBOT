@@ -84,7 +84,9 @@ Append after the `OFFER_*` block (ends `config.py:88`):
 # COUPON_OFFER_HOURS. Codes stop working COUPON_TTL_HOURS after posting.
 # The alphabet excludes O/0/I/1 so a mistyped code cannot hit another coupon.
 COUPON_COUNT = int(os.getenv("COUPON_COUNT", "10"))
-COUPON_CODE_LENGTH = int(os.getenv("COUPON_CODE_LENGTH", "6"))
+# Floored at 6: the codes are brute-forceable through the chat handler over
+# their 24h life, and a shorter code silently removes that protection.
+COUPON_CODE_LENGTH = max(6, int(os.getenv("COUPON_CODE_LENGTH", "6")))
 COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
 COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
 COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
@@ -122,7 +124,7 @@ git commit -m "feat(config): add postable channel id and coupon knobs"
 
 **Interfaces:**
 - Consumes: `COUPON_ALPHABET`, `COUPON_CODE_LENGTH` from Task 1
-- Produces: `generate_coupon_code(length: int | None = None) -> str`
+- Produces: `generate_coupon_code() -> str`
 
 - [ ] **Step 1: Write the failing check**
 
@@ -141,21 +143,40 @@ from database import generate_coupon_code
 
 
 def test_code_format():
-    codes = {generate_coupon_code() for _ in range(500)}
-    assert len(codes) > 400, "generator is not random enough"
+    # Scale the draw to the configured keyspace: a hardcoded bound would blame
+    # the generator for a shrunken alphabet or length.
+    keyspace = len(COUPON_ALPHABET) ** COUPON_CODE_LENGTH
+    draws = 500
+    codes = {generate_coupon_code() for _ in range(draws)}
+    assert len(codes) > min(draws * 0.8, keyspace * 0.8), (
+        f"only {len(codes)} distinct in {draws} draws over a {keyspace} keyspace"
+    )
     for c in codes:
         assert len(c) == COUPON_CODE_LENGTH, c
         assert set(c) <= set(COUPON_ALPHABET), c
         assert not (set(c) & set("O0I1")), f"ambiguous glyph in {c}"
 
 
-def test_code_length_override():
-    assert len(generate_coupon_code(10)) == 10
+def test_keyspace_is_brute_force_resistant():
+    # A config typo shortening the code must fail loudly, not silently weaken
+    # the codes: these are guessable over a 24h TTL through the chat handler.
+    keyspace = len(COUPON_ALPHABET) ** COUPON_CODE_LENGTH
+    assert keyspace >= 10**9, f"keyspace {keyspace} is brute-forceable"
+
+
+def test_matches_redeem_regex():
+    # The handler in Task 4 only accepts codes matching this; a generator that
+    # emits anything else would mint codes nobody can redeem.
+    import re
+    pattern = re.compile(rf"^[{COUPON_ALPHABET}]{{{COUPON_CODE_LENGTH}}}$")
+    for _ in range(100):
+        assert pattern.match(generate_coupon_code())
 
 
 if __name__ == "__main__":
     test_code_format()
-    test_code_length_override()
+    test_keyspace_is_brute_force_resistant()
+    test_matches_redeem_regex()
     print("coupon checks passed")
 ```
 
@@ -176,13 +197,17 @@ Append to `database.py`. Note `secrets` is not currently imported — use `secre
 # value and are worthless to leak.
 
 
-def generate_coupon_code(length: int | None = None) -> str:
-    """A random coupon code from the unambiguous alphabet."""
+def generate_coupon_code() -> str:
+    """A random coupon code from the unambiguous alphabet.
+
+    secrets, not random: the codes are posted publicly, and Mersenne Twister
+    state is recoverable from observed output — which would let an observer
+    derive codes that have not been posted yet.
+    """
     import secrets
     from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
 
-    n = COUPON_CODE_LENGTH if length is None else length
-    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(n))
+    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(COUPON_CODE_LENGTH))
 ```
 
 - [ ] **Step 4: Run the check to verify it passes**
@@ -423,7 +448,8 @@ Extend the `__main__` block to run it:
 if __name__ == "__main__":
     import asyncio
     test_code_format()
-    test_code_length_override()
+    test_keyspace_is_brute_force_resistant()
+    test_matches_redeem_regex()
     asyncio.run(test_redeem_against_mongo())
     print("coupon checks passed")
 ```
@@ -696,7 +722,7 @@ git commit -m "feat: post nightly coupon batch to the updates channel"
 
 **Placeholder scan:** no TBD/TODO; every code step has literal code; Task 4 Step 4 gives a concrete fallback if an emoji name is absent.
 
-**Type consistency:** `redeem_coupon` returns `tuple[str, int]` in Task 3 and is unpacked as `status, credits` in Task 4. `generate_coupon_code(length=None) -> str` matches its Task 2 definition and its Task 3 call. `create_coupon_batch() -> list[str]` matches `post_coupon_batch(bot, codes: list[str])`. Batch date is a `YYYY-MM-DD` string in both the getter/setter and the processor comparison.
+**Type consistency:** `redeem_coupon` returns `tuple[str, int]` in Task 3 and is unpacked as `status, credits` in Task 4. `generate_coupon_code() -> str` matches its Task 2 definition and its Task 3 call. `create_coupon_batch() -> list[str]` matches `post_coupon_batch(bot, codes: list[str])`. Batch date is a `YYYY-MM-DD` string in both the getter/setter and the processor comparison.
 
 **Amendments during execution** (both ruled by the human partner before Task 1):
 
