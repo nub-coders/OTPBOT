@@ -1920,3 +1920,19 @@ async def set_wa_price(phone_number: str, price: int) -> bool:
     )
     return res.modified_count > 0
 
+
+# ── Coupons ──
+#
+# Nightly codes posted to the updates channel. Any user may redeem any code
+# once; the reward is rolled at redeem time so the codes themselves carry no
+# value and are worthless to leak.
+
+
+def generate_coupon_code(length: int | None = None) -> str:
+    """A random coupon code from the unambiguous alphabet."""
+    import secrets
+    from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
+
+    n = COUPON_CODE_LENGTH if length is None else length
+    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(n))
+
