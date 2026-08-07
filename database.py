@@ -6,12 +6,7 @@ from pymongo.errors import DuplicateKeyError
 from config import MONGODB_URI, ADMIN_IDS, MODERATOR_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
 from utils import detect_country
 
-# An empty MONGODB_URI raises ConfigurationError("Empty host") right here, at
-# import, which takes down anything that merely imports this module (the
-# offline coupon self-checks, for one). Fall back to the conventional local
-# default so the import always succeeds; a misconfigured deployment then fails
-# on its first query instead of at import.
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI or "mongodb://127.0.0.1:27017")
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client.otpbot
 
 # ponytail: per-task user cache. The verified decorator pre-fetches user once,
@@ -1981,7 +1976,7 @@ async def create_coupon_batch(count: int | None = None, ttl_hours: float | None 
 async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
     """Redeem a coupon and grant a discount offer.
 
-    Returns (status, credits): status is "ok" | "unknown" | "expired" | "already";
+    Returns (status, credits): status is "ok" | "no_user" | "unknown" | "expired" | "already";
     credits is the effective discount on success, else 0.
 
     The claim is one update_one so the once-per-user check and the claim cannot
@@ -1992,6 +1987,12 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
 
     code = code.strip().upper()
     now = datetime.now(timezone.utc)
+
+    # Before the claim, not after: the offer update below is not an upsert, so a
+    # user with no document would have the code marked redeemed and get nothing.
+    # get_user is served from the per-task cache the handler already warmed.
+    if not await get_user(telegram_id):
+        return "no_user", 0
 
     claim = await db.coupons.update_one(
         {"code": code, "expires_at": {"$gt": now}, "redeemed_by": {"$ne": telegram_id}},

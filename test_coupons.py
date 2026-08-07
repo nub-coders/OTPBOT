@@ -3,7 +3,9 @@
 Run: python3 test_coupons.py    (no test framework needed)
 
 The redeem checks need a real MongoDB and skip when none is reachable; the
-format checks run anywhere.
+format checks run anywhere. database.py builds its client at import, so with
+no MONGODB_URI configured at all this file cannot load — configure one or
+accept the ConfigurationError.
 """
 from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
 from database import generate_coupon_code
@@ -155,11 +157,22 @@ async def test_redeem_against_mongo():
         assert (await db.redeem_coupon(uid_a, "ZZZZ0O"))[0] == "unknown"
         await db.db.coupons.update_one(
             {"code": code}, {"$set": {"expires_at": now - timedelta(hours=1)}})
+        await db.create_user(-9003, "coupon_test_c", "Coupon Test C")
         assert (await db.redeem_coupon(-9003, code))[0] == "expired"
+
+        # A user with no document is refused and the code is NOT spent: the
+        # offer write is not an upsert, so claiming first would burn the
+        # redemption and grant nothing.
+        no_user, zero = await db.redeem_coupon(-9004, codes[1])
+        assert no_user == "no_user", no_user
+        assert zero == 0
+        spent = await db.db.coupons.find_one({"code": codes[1]})
+        assert -9004 not in spent["redeemed_by"], "burned a code on a missing user"
         print("mongo redeem checks passed")
     finally:
         await db.db.coupons.delete_many({"code": {"$in": codes}})
-        await db.db.users.delete_many({"telegram_id": {"$in": [uid_a, uid_b, -9003]}})
+        await db.db.users.delete_many(
+            {"telegram_id": {"$in": [uid_a, uid_b, -9003, -9004]}})
 
 
 if __name__ == "__main__":

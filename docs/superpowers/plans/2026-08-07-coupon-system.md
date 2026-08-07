@@ -266,7 +266,7 @@ git commit -m "feat(db): add coupon code generator"
 - Consumes: `generate_coupon_code` from Task 2; `COUPON_*` from Task 1
 - Produces:
   - `async create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]`
-  - `async redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]` returning `(status, credits)` where status is one of `"ok"`, `"unknown"`, `"expired"`, `"already"` and `credits` is the effective discount on `"ok"` else `0`
+  - `async redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]` returning `(status, credits)` where status is one of `"ok"`, `"no_user"`, `"unknown"`, `"expired"`, `"already"` and `credits` is the effective discount on `"ok"` else `0`. The `"no_user"` check runs *before* the claim: the offer write is not an upsert, so claiming first would spend the code and grant nothing.
   - `async get_last_coupon_batch_date() -> str` / `async set_last_coupon_batch_date(day: str) -> None` (`day` is `YYYY-MM-DD`)
 
 - [ ] **Step 1: Add the index**
@@ -317,7 +317,7 @@ async def create_coupon_batch(count: int | None = None, ttl_hours: float | None 
 async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
     """Redeem a coupon and grant a discount offer.
 
-    Returns (status, credits): status is "ok" | "unknown" | "expired" | "already";
+    Returns (status, credits): status is "ok" | "no_user" | "unknown" | "expired" | "already";
     credits is the effective discount on success, else 0.
 
     The claim is one update_one so the once-per-user check and the claim cannot
@@ -328,6 +328,12 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
 
     code = code.strip().upper()
     now = datetime.now(timezone.utc)
+
+    # Before the claim, not after: the offer update below is not an upsert, so a
+    # user with no document would have the code marked redeemed and get nothing.
+    # get_user is served from the per-task cache the handler already warmed.
+    if not await get_user(telegram_id):
+        return "no_user", 0
 
     claim = await db.coupons.update_one(
         {"code": code, "expires_at": {"$gt": now}, "redeemed_by": {"$ne": telegram_id}},
@@ -468,11 +474,22 @@ async def test_redeem_against_mongo():
         assert (await db.redeem_coupon(uid_a, "ZZZZZZ"))[0] == "unknown"
         await db.db.coupons.update_one(
             {"code": code}, {"$set": {"expires_at": now - timedelta(hours=1)}})
+        await db.create_user(-9003, "coupon_test_c", "Coupon Test C")
         assert (await db.redeem_coupon(-9003, code))[0] == "expired"
+
+        # A user with no document is refused and the code is NOT spent: the
+        # offer write is not an upsert, so claiming first would burn the
+        # redemption and grant nothing.
+        no_user, zero = await db.redeem_coupon(-9004, codes[1])
+        assert no_user == "no_user", no_user
+        assert zero == 0
+        spent = await db.db.coupons.find_one({"code": codes[1]})
+        assert -9004 not in spent["redeemed_by"], "burned a code on a missing user"
         print("mongo redeem checks passed")
     finally:
         await db.db.coupons.delete_many({"code": {"$in": codes}})
-        await db.db.users.delete_many({"telegram_id": {"$in": [uid_a, uid_b, -9003]}})
+        await db.db.users.delete_many(
+            {"telegram_id": {"$in": [uid_a, uid_b, -9003, -9004]}})
 ```
 
 Extend the `__main__` block to run it:
@@ -543,7 +560,7 @@ async def _handle_coupon_text(message, text: str) -> bool:
         return False
 
     status, credits = await db.redeem_coupon(message.from_user.id, code)
-    if status == "unknown":
+    if status in ("unknown", "no_user"):
         return False  # not one of ours — stay silent, it was probably just chatter
     if status == "already":
         await message.reply(f"{em.BLOCKED} You've already used this coupon.")
