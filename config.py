@@ -38,12 +38,18 @@ else:
 # the raw @username / -100 chat id. Empty disables the coupon broadcast.
 _updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
 if _updates_id.startswith(("https://t.me/", "http://t.me/")):
-    _updates_id = "@" + _updates_id.rstrip("/").rsplit("/", 1)[-1]
+    _updates_id = _updates_id.split("/", 3)[-1].rstrip("/")
+_updates_id = _updates_id.lstrip("@")
 if _updates_id.lstrip("-").isdigit():
     UPDATES_CHANNEL_ID = _updates_id
-elif _updates_id:
-    UPDATES_CHANNEL_ID = _updates_id if _updates_id.startswith("@") else f"@{_updates_id}"
+elif (4 <= len(_updates_id) <= 32 and _updates_id.isascii()
+        and _updates_id.replace("_", "").isalnum()):
+    UPDATES_CHANNEL_ID = f"@{_updates_id}"
 else:
+    # A private invite link (t.me/+hash, /joinchat/…) has no @username form.
+    # Leave this empty so the broadcast disables itself instead of failing
+    # every night against an unroutable peer; set UPDATES_CHANNEL_ID to the
+    # numeric -100… id to post into a private channel.
     UPDATES_CHANNEL_ID = ""
 
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
