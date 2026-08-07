@@ -346,16 +346,6 @@ async def set_offer(telegram_id: int, credits: int, duration_hours: float):
     return offer
 
 
-async def get_last_daily_discount_time() -> datetime | None:
-    doc = await db.system.find_one({"_id": "daily_discount"})
-    return doc.get("last_run") if doc else None
-
-
-async def set_last_daily_discount_time(dt: datetime):
-    await db.system.update_one({"_id": "daily_discount"}, {"$set": {"last_run": dt}}, upsert=True)
-
-
-
 # ── Sessions ──
 
 async def save_session(phone_number: str, session_string: str, added_by: int,
@@ -1119,6 +1109,23 @@ async def get_user_payments(user_id: int, limit: int = 5):
     return await db.payments.find({"user_id": user_id}).sort("created_at", -1).to_list(limit)
 
 
+async def get_user_transactions(user_id: int, limit: int = 5) -> list[dict]:
+    """Return combined list of payments (deposits) and withdrawal requests, sorted by date desc."""
+    payments = await db.payments.find({"user_id": user_id}).sort("created_at", -1).to_list(limit)
+    withdrawals = await db.withdrawal_requests.find({"seller_id": user_id}).sort("created_at", -1).to_list(limit)
+    
+    combined = []
+    for p in payments:
+        p["transaction_type"] = "deposit"
+        combined.append(p)
+    for w in withdrawals:
+        w["transaction_type"] = "withdrawal"
+        combined.append(w)
+        
+    combined.sort(key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return combined[:limit]
+
+
 async def get_payment_stats():
     total = await db.payments.count_documents({})
     pipeline = [{"$group": {"_id": "$method", "count": {"$sum": 1}, "total": {"$sum": "$amount"}}}]
@@ -1485,7 +1492,9 @@ async def get_user_seller_details(seller_id: int) -> dict:
     listings = await db.sell_listings.find({"seller_id": seller_id}).sort("created_at", -1).to_list(None)
     s_live = await db.sessions.find({"added_by": seller_id}).to_list(None)
     s_rem = await db.removed_sessions.find({"added_by": seller_id}).to_list(None)
+    blacklist = await db.seller_phone_blacklist.find({"seller_id": seller_id}).to_list(None)
 
+    blacklist_map = {b["phone_number"]: b for b in blacklist if b.get("phone_number")}
     listed_map = {}
     sold_map = {}
 
@@ -1494,10 +1503,15 @@ async def get_user_seller_details(seller_id: int) -> dict:
         st = l.get("status")
         if not ph:
             continue
-        if st in ("active", "pending_price"):
+        if st in ("active", "pending_price", "removed"):
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = st
             listed_map[ph] = {
                 "phone_number": ph,
-                "status": st,
+                "status": display_status,
                 "created_at": l.get("created_at"),
                 "country_code": l.get("country_code", "XX"),
             }
@@ -1509,15 +1523,20 @@ async def get_user_seller_details(seller_id: int) -> dict:
                 "country_code": l.get("country_code", "XX"),
             }
 
-    for s in (s_live + s_rem):
+    for s in s_live:
         ph = s.get("phone_number")
         st = s.get("status")
         if not ph:
             continue
         if st in ("active", "pending_price") and ph not in listed_map and ph not in sold_map:
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = st
             listed_map[ph] = {
                 "phone_number": ph,
-                "status": st,
+                "status": display_status,
                 "created_at": s.get("created_at"),
                 "country_code": s.get("country_code", "XX"),
             }
@@ -1526,6 +1545,31 @@ async def get_user_seller_details(seller_id: int) -> dict:
                 "phone_number": ph,
                 "payout": s.get("sold_price", 0),
                 "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+
+    for s in s_rem:
+        ph = s.get("phone_number")
+        st = s.get("status")
+        if not ph:
+            continue
+        if st == "sold" and ph not in sold_map:
+            sold_map[ph] = {
+                "phone_number": ph,
+                "payout": s.get("sold_price", 0),
+                "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+        elif st in ("active", "pending_price") and ph not in listed_map and ph not in sold_map:
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = "removed"
+            listed_map[ph] = {
+                "phone_number": ph,
+                "status": display_status,
+                "created_at": s.get("created_at"),
                 "country_code": s.get("country_code", "XX"),
             }
 

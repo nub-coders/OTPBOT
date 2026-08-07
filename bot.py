@@ -277,125 +277,6 @@ async def _check_referral_reward(user_id: int, purchased_credits: int):
             log.warning("Failed to notify referrer %d of commission: %s", referrer_id, e)
 
 
-
-_daily_discount_lock = asyncio.Lock()
-# ponytail: monotonic timestamp of the last daily-discount run; 0.0 = not yet
-# checked this process, so the first check syncs from Mongo.
-_last_daily_discount_check: float = 0.0
-
-
-async def _process_daily_discounts(client):
-    """Grant random discount offers to up to 5 eligible non-admin users."""
-    try:
-        users = await db.get_all_users()
-        import random
-        random.shuffle(users)
-        granted_users = []
-        for u in users:
-            if len(granted_users) >= 5:
-                break
-            uid = u.get("telegram_id")
-            if not uid or await db.is_admin(uid):
-                continue
-            offer, granted = await maybe_grant_offer(uid)
-            if granted and offer:
-                credits_discount = offer.get("credits", 0)
-                await db.add_credits(uid, credits_discount)
-                current_credits = await db.get_credits(uid)
-
-                expires_at = offer.get("expires_at")
-                hours = 4
-                if expires_at:
-                    if expires_at.tzinfo is None:
-                        expires_at = expires_at.replace(tzinfo=timezone.utc)
-                    hours = max(1, int((expires_at - datetime.now(timezone.utc)).total_seconds() // 3600))
-                try:
-                    await client.send_message(
-                        uid,
-                        f"🎁 **Special Daily Bonus Drop!**\n\n"
-                        f"🎉 You've been awarded **{credits_discount} bonus credits**!\n"
-                        f"💰 Your new balance: **{current_credits} credits**.\n"
-                        f"⏰ Valid for the next **{hours} hours**.\n"
-                        f"Check out the catalog to buy your account now!"
-                    )
-                except Exception as e:
-                    log.warning("Could not notify user %s of daily discount: %s", uid, e)
-
-                granted_users.append({
-                    "uid": uid,
-                    "first_name": u.get("first_name", ""),
-                    "username": u.get("username", ""),
-                    "discount": credits_discount,
-                    "credits": current_credits,
-                })
-
-        if granted_users:
-            msg_blocks = [f"{em.GIFT} **Daily Discount Drop!**\n"]
-            for gu in granted_users:
-                display_name = gu["first_name"] or ""
-                username = gu["username"]
-                name_line = f"📛 Name: {display_name}"
-                user_line = f"\n👤 Username: @{username}" if username else ""
-                msg_blocks.append(
-                    f"{em.USER} **User Selected**\n"
-                    f"{em.ID_BADGE} ID: `{gu['uid']}`\n"
-                    f"{name_line}{user_line}\n"
-                    f"🎁 Bonus Granted: **+{gu['discount']} credits**\n"
-                    f"💰 Current Credits: **{gu['credits']} credits**\n"
-                )
-            announcement = "\n".join(msg_blocks)
-            await alert(client, announcement)
-    except Exception as e:
-        log.error("Error in _process_daily_discounts: %s", e)
-
-
-
-async def _check_and_trigger_daily_discounts(client):
-    """Check if 24h have passed since last daily discount run; if so, trigger background task."""
-    # ponytail: in-memory monotonic timestamp instead of Mongo round-trip per action.
-    # Falls back to Mongo on first check after restart.
-    global _last_daily_discount_check
-    now_mono = time.monotonic()
-
-    async with _daily_discount_lock:
-        if _last_daily_discount_check == 0.0:
-            # First check since process start — sync from Mongo.
-            last_run_dt = await db.get_last_daily_discount_time()
-            if last_run_dt:
-                if last_run_dt.tzinfo is None:
-                    last_run_dt = last_run_dt.replace(tzinfo=timezone.utc)
-                elapsed = (datetime.now(timezone.utc) - last_run_dt).total_seconds()
-                if elapsed < 86400:
-                    # Still in the cooldown — seed the monotonic timer with the
-                    # remaining cooldown so we don't run until 24h from the last Mongo run.
-                    _last_daily_discount_check = now_mono - elapsed
-                    return
-            # Either no last_run in Mongo or cooldown expired — run immediately.
-            _last_daily_discount_check = now_mono
-        else:
-            # Normal in-memory check.
-            elapsed = now_mono - _last_daily_discount_check
-            if elapsed < 86400:
-                return
-            _last_daily_discount_check = now_mono
-
-        # Persist timestamp to Mongo so next restart sees it.
-        await db.set_last_daily_discount_time(datetime.now(timezone.utc))
-
-    await _process_daily_discounts(client)
-
-
-def check_daily_discount(func):
-    """Decorator for Pyrogram handlers to check if 24h passed and spawn background discount task."""
-    from functools import wraps
-    @wraps(func)
-    async def wrapper(client, update, *args, **kwargs):
-        db.begin_user_cache()
-        asyncio.create_task(_check_and_trigger_daily_discounts(client))
-        return await func(client, update, *args, **kwargs)
-    return wrapper
-
-
 def verified(func):
     from functools import wraps
     @wraps(func)
@@ -403,7 +284,6 @@ def verified(func):
         # ponytail: start per-task user cache so get_user/get_credits/is_admin
         # etc hit ctx-var instead of separate Mongo round-trips.
         db.begin_user_cache()
-        asyncio.create_task(_check_and_trigger_daily_discounts(client))
 
         if VERIFICATION_ENABLED:
             tg_user = update.from_user
@@ -2204,26 +2084,36 @@ def _register_handlers(app: Client):
         else:
             buyer_block = "\n\n🛍 **Buyer Info:** None (0 bought)"
 
-        # Recent payments — most recent first.
-        payments = await db.get_user_payments(uid, limit=5)
-        if payments:
+        # Recent payments/withdrawals — most recent first.
+        transactions = await db.get_user_transactions(uid, limit=5)
+        if transactions:
             pay_lines = []
-            for p in payments:
-                p_at = p.get("created_at")
-                p_str = p_at.strftime("%Y-%m-%d %H:%M UTC") if p_at else "—"
-                amount = p.get("amount", 0)
-                currency = p.get("currency", "")
-                method = p.get("method", "—")
-                p_credits = p.get("credits", 0)
-                pay_lines.append(
-                    f"• **{amount} {currency}** ({method}) → **{p_credits}** credits — {p_str}"
-                )
+            for t in transactions:
+                t_at = t.get("created_at")
+                t_str = t_at.strftime("%Y-%m-%d %H:%M UTC") if t_at else "—"
+                if t.get("transaction_type") == "withdrawal":
+                    w_amount = t.get("amount", 0)
+                    w_method = t.get("method", "—")
+                    w_details = t.get("details", "")
+                    w_status = t.get("status", "pending")
+                    pay_lines.append(
+                        f"• 🔴 **-{w_amount} cr** (Withdrawal via {w_method} to `{w_details}`) [{w_status}] — {t_str}"
+                    )
+                else:
+                    amount = t.get("amount", 0)
+                    currency = t.get("currency", "")
+                    method = t.get("method", "—")
+                    p_credits = t.get("credits")
+                    credits_str = f" → **{p_credits}** credits" if p_credits is not None else ""
+                    pay_lines.append(
+                        f"• 🟢 **{amount} {currency}** ({method}){credits_str} — {t_str}"
+                    )
             payments_block = (
-                f"\n\n{em.RECEIPT} **Recent Payments** ({len(payments)})\n"
+                f"\n\n{em.RECEIPT} **Recent Payments & Withdrawals** ({len(transactions)})\n"
                 f"<blockquote>" + "\n".join(pay_lines) + "</blockquote>"
             )
         else:
-            payments_block = f"\n\n{em.RECEIPT} **Recent Payments:** none"
+            payments_block = f"\n\n{em.RECEIPT} **Recent Payments & Withdrawals:** none"
 
         await message.reply(
             f"{role_icon} **User Info**\n\n"
