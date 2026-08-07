@@ -171,7 +171,7 @@ async def _on_new_message(client: Client, message):
                 log.error("[%s] Failed to forward msg to %d: %s", phone, user_id, e)
 
 
-def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False, credits_deducted: int = 0, balance_deducted: int = 0, order_id: str | None = None):
+def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, no_sale: bool = False, credits_deducted: int = 0, balance_deducted: int = 0, order_id: str | None = None, offer_granted_at=None):
     if phone in active_requests and active_requests[phone].get("timer"):
         active_requests[phone]["timer"].cancel()
 
@@ -186,8 +186,11 @@ def assign_number(phone: str, user_id: int, timeout: int = 300, price: int = 1, 
         "otp_received": False,
         "no_sale": no_sale,   # seller logging into their OWN listing — never mark sold
         "order_id": order_id,
+        # Which offer instance this purchase spent, so a restore cannot revive a
+        # different offer the user redeemed while this assignment was live.
+        "offer_granted_at": offer_granted_at,
     }
-    asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout, order_id))
+    asyncio.create_task(db.save_active_assignment(phone, user_id, price, timeout, order_id, offer_granted_at))
     log.info("[%s] Assigned to user %d (timeout=%ds, price=%d, no_sale=%s)", phone, user_id, timeout, price, no_sale)
 
 
@@ -230,7 +233,7 @@ async def _on_timeout(phone: str):
         else:
             log.info("[%s] Timeout — no OTP, free assignment (no refund)", phone)
 
-        restored = await db.restore_offer(user_id)
+        restored = await db.restore_offer(user_id, req.get("offer_granted_at"))
         if bot_app:
             offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
             refund_line = f"💰 **{price} credits** refunded." if price > 0 else ""

@@ -708,13 +708,22 @@ async def coupon_processor(bot):
         try:
             now = datetime.now(timezone.utc)
             today = now.strftime("%Y-%m-%d")
-            if await db.get_last_coupon_batch_date() != today:
+            # Hour gate: the day's batch is simply "missing" until it is posted,
+            # so without this a bot started at 15:00 announces "Tonight's Coupon
+            # Codes" at 15:00. The 1h window still recovers a batch missed by a
+            # restart straddling midnight; a longer outage waits for 00:00.
+            if now.hour == 0 and await db.get_last_coupon_batch_date() != today:
                 codes = await db.create_coupon_batch()
                 # Recorded before the post succeeds: a missed post can be re-sent
                 # by hand, a double post cannot be taken back.
                 await db.set_last_coupon_batch_date(today)
-                posted = await post_coupon_batch(bot, codes)
-                log.info("Coupon batch %s: %d codes, posted=%s", today, len(codes), posted)
+                if await post_coupon_batch(bot, codes):
+                    log.info("Coupon batch %s: %d codes posted", today, len(codes))
+                else:
+                    # The codes are already live in Mongo and expire unused if
+                    # nobody ever saw them — that needs an operator's eye.
+                    log.error("Coupon batch %s: %d codes created but NOT posted",
+                              today, len(codes))
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             delay = max(60, (tomorrow - now).total_seconds())
         except Exception as e:

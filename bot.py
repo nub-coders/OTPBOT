@@ -3240,9 +3240,10 @@ def _register_handlers(app: Client):
                 reply_markup=back_kb("main_menu"),
             )
         else:
+            spent_offer_at = released.get("offer_granted_at")
             if price > 0:
-                await db.save_pending_refund(user_id, phone, price)
-            restored = await db.restore_offer(user_id, delay_hours=1 if price > 0 else 0)
+                await db.save_pending_refund(user_id, phone, price, spent_offer_at)
+            restored = await db.restore_offer(user_id, spent_offer_at, delay_hours=1 if price > 0 else 0)
             offer_line = f"\n{em.GIFT} **Discount offer restored!**" if restored else ""
             await safe_edit(cq.message,
                 f"{em.UNLOCK} `{mask_phone(phone)}` released.\n\n"
@@ -5345,11 +5346,15 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
             return False
         log.info("Deducted %d credits and %d balance from user %d on selection", credits_deducted, balance_deducted, user_id)
 
+    # Spend the offer this purchase was actually priced against (read far above,
+    # before ~27 awaits of session work). A coupon redeemed in that window
+    # replaces the slot, and an unkeyed consume would burn the coupon instead.
+    offer_granted_at = offer.get("granted_at") if offer else None
     if offer:
-        await db.consume_offer(user_id)
+        await db.consume_offer(user_id, offer_granted_at)
 
     order_id = db.new_order_id()
-    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id)
+    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id, offer_granted_at=offer_granted_at)
     # Assignment done — the in-memory active_requests gate now blocks other buyers,
     # so return the DB status to 'active' (release/timeout/sold paths expect it).
     await db.unreserve_session(phone)

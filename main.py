@@ -43,7 +43,7 @@ async def recover_orphaned_assignments(bot):
                     cd = a.get("credits_deducted", price)
                     bd = a.get("balance_deducted", 0)
                     await db.restore_purchase_funds(user_id, cd, bd)
-                restored = await db.restore_offer(user_id)
+                restored = await db.restore_offer(user_id, a.get("offer_granted_at"))
                 offer_line = f"\n🎁 **Discount offer restored!**" if restored else ""
                 log.info("[%s] Orphan — no OTP, refunded %d credits to user %d", phone, price, user_id)
                 try:
@@ -116,7 +116,8 @@ async def refund_processor(bot):
                 if not claimed:
                     continue
                 await db.add_credits(user_id, amount)
-                restored = await db.restore_offer(user_id, grace_minutes=15)
+                restored = await db.restore_offer(
+                    user_id, refund.get("offer_granted_at"), grace_minutes=15)
                 await db.mark_refund_done(refund["_id"])
                 new_balance = await db.get_credits(user_id)
                 log.info("Refund processed: %d credits to user %d", amount, user_id)

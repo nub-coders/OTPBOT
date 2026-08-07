@@ -259,21 +259,39 @@ async def get_active_offer(telegram_id: int) -> dict | None:
     return offer
 
 
-async def consume_offer(telegram_id: int):
-    """Mark the user's active discount offer as used after a purchase."""
-    await db.users.update_one(
-        {"telegram_id": telegram_id},
-        {"$set": {"offer.used": True}},
-    )
+async def consume_offer(telegram_id: int, granted_at=None):
+    """Mark the offer a purchase was priced against as used.
+
+    granted_at identifies which offer instance to spend. A user holds one offer
+    slot, so a coupon redeemed while a purchase is still in flight replaces the
+    offer that purchase priced against; without this filter the purchase would
+    spend the newly redeemed coupon instead. None falls back to spending
+    whatever occupies the slot — the opposite default to restore_offer, so that
+    an unidentified call always errs against the user rather than the platform.
+    """
+    query = {"telegram_id": telegram_id}
+    if granted_at is not None:
+        query["offer.granted_at"] = granted_at
+    await db.users.update_one(query, {"$set": {"offer.used": True}})
     _invalidate_user_cache(telegram_id)
 
 
-async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
+async def restore_offer(telegram_id: int, granted_at=None, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
     """Restore a used discount offer if a purchase attempt failed or timed out without OTP.
 
     If the offer expired (or has less than delay_hours + grace_minutes left), extend
     expires_at to cover delay_hours + grace_minutes so the user does not lose their
     discount while waiting for a pending refund or session timeout.
+
+    granted_at identifies the offer this purchase spent, and None means it spent
+    none (a price=0 OTP re-request or seller self-login) so there is nothing to
+    restore. Restoring on a mismatch — or on None — would un-spend whatever
+    offer happens to occupy the slot now, such as a coupon redeemed after this
+    purchase started, handing out its discount a second time.
+
+    consume_offer errs the opposite way for the same reason: an unidentified
+    consume marks the current offer used. Each default costs the user at most a
+    discount they did not pay for the right to keep, never the platform.
     Returns True if an offer was restored, False otherwise.
     """
     user = await get_user(telegram_id)
@@ -281,6 +299,8 @@ async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: 
         return False
 
     offer = user["offer"]
+    if offer.get("granted_at") != granted_at:
+        return False
     was_used = offer.get("used", False)
     now = datetime.now(timezone.utc)
     expires_at = offer.get("expires_at")
@@ -294,11 +314,13 @@ async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: 
         if expires_at <= now or (expires_at - now).total_seconds() < needed_seconds:
             update_doc["$set"] = {"offer.expires_at": now + timedelta(seconds=needed_seconds)}
 
-    await db.users.update_one(
-        {"telegram_id": telegram_id},
-        update_doc,
-    )
+    # Keyed on the write too, not just the read above: a coupon redeemed in
+    # between would otherwise be the offer this unset revives.
+    res = await db.users.update_one(
+        {"telegram_id": telegram_id, "offer.granted_at": granted_at}, update_doc)
     _invalidate_user_cache(telegram_id)
+    if res.matched_count == 0:
+        return False
     return was_used
 
 
@@ -642,7 +664,7 @@ async def get_user_otps(telegram_id: int, limit: int = 100):
 
 # ── Active Assignments ──
 
-async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int, order_id: str | None = None):
+async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int, order_id: str | None = None, offer_granted_at=None):
     doc = {
         "phone_number": phone_number,
         "user_id": user_id,
@@ -651,6 +673,7 @@ async def save_active_assignment(phone_number: str, user_id: int, price: int, ti
         "assigned_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=timeout),
         "order_id": order_id,
+        "offer_granted_at": offer_granted_at,
     }
     await db.active_assignments.update_one(
         {"phone_number": phone_number},
@@ -738,11 +761,12 @@ async def mark_pending_payment_expired(qr_id: str):
 REFUND_DELAY_HOURS = 1
 
 
-async def save_pending_refund(user_id: int, phone_number: str, amount: int):
+async def save_pending_refund(user_id: int, phone_number: str, amount: int, offer_granted_at=None):
     await db.pending_refunds.insert_one({
         "user_id": user_id,
         "phone_number": phone_number,
         "amount": amount,
+        "offer_granted_at": offer_granted_at,
         "status": "pending",
         "created_at": datetime.now(timezone.utc),
         "refund_at": datetime.now(timezone.utc) + timedelta(hours=REFUND_DELAY_HOURS),
@@ -2015,7 +2039,7 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
     # same instant clobber each other's discount. The "cur" condition mirrors
     # get_active_offer: a used or expired offer counts as 0, so it cannot block
     # a fresh roll.
-    await db.users.update_one(
+    grant = await db.users.update_one(
         {"telegram_id": telegram_id},
         [
             {"$set": {"offer": {
@@ -2043,10 +2067,19 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
     )
     _invalidate_user_cache(telegram_id)
 
+    if grant.matched_count == 0:
+        # The user's document vanished between the guard above and this write.
+        # The claim already succeeded, so hand the code back rather than report
+        # a discount that was never stored.
+        await db.coupons.update_one(
+            {"code": code}, {"$pull": {"redeemed_by": telegram_id}})
+        return "no_user", 0
+
     # Read back the value the server actually stored, so the reply cannot
-    # disagree with the database after a concurrent redemption.
+    # disagree with the database after a concurrent redemption. No `rolled`
+    # fallback: that would defeat the read-back it is standing in for.
     user = await get_user(telegram_id)
-    credits = int(((user or {}).get("offer") or {}).get("credits", rolled))
+    credits = int(((user or {}).get("offer") or {}).get("credits", 0))
     return "ok", credits
 
 

@@ -89,7 +89,12 @@ async def test_redeem_against_mongo():
     # Bound to the configured range, not a literal: a retuned COUPON_MAX_CREDITS
     # must not turn a passing check into a spurious failure.
     big = COUPON_MAX_CREDITS + 100
-    codes = []  # bound before the try so the finally can always clean up
+    # Cleanup keys off this timestamp, not the returned list: if
+    # create_coupon_batch raises after inserting some of its codes, the list is
+    # never bound and those live codes would stay in the production collection
+    # forever (there is no TTL index on coupons.expires_at).
+    started_at = datetime.now(timezone.utc)
+    codes = []
     try:
         # redeem_coupon's $set on users is not an upsert — same as set_offer and
         # every other users write here. Production users exist by then (/start
@@ -174,11 +179,51 @@ async def test_redeem_against_mongo():
         assert zero == 0
         spent = await db.db.coupons.find_one({"code": codes[1]})
         assert -9004 not in spent["redeemed_by"], "burned a code on a missing user"
+
+        # A coupon redeemed mid-purchase replaces the offer that purchase priced
+        # against. When that purchase then fails, restoring must not un-spend the
+        # newer coupon offer — that hands out its discount twice. consume/restore
+        # are keyed on offer.granted_at to tell the instances apart.
+        # A code uid_a has not spent yet: every earlier one would return
+        # "already" and grant nothing, so the replacement would never happen.
+        codes += await db.create_coupon_batch(count=1)
+        await db.set_offer(uid_a, 10, 6)
+        old = (await db.get_user(uid_a))["offer"]["granted_at"]
+        await db.consume_offer(uid_a, old)                  # purchase X prices against it
+        status, _ = await db.redeem_coupon(uid_a, codes[-1])  # coupon lands mid-flight
+        assert status == "ok", status
+        new = (await db.get_user(uid_a))["offer"]["granted_at"]
+        assert new != old, "coupon did not replace the offer slot"
+        await db.consume_offer(uid_a, new)                  # purchase Y spends the coupon
+        assert await db.restore_offer(uid_a, old) is False, "stale restore was allowed"
+        assert await db.get_active_offer(uid_a) is None, (
+            "restoring purchase X revived the coupon offer purchase Y already spent")
+        # The offer its own purchase spent is still restorable.
+        assert await db.restore_offer(uid_a, new) is True
+        assert await db.get_active_offer(uid_a) is not None
+        # None means no offer was spent (price=0 re-request, seller self-login),
+        # so it must never revive whatever happens to occupy the slot.
+        await db.consume_offer(uid_a, new)
+        assert await db.restore_offer(uid_a, None) is False, "unkeyed restore was allowed"
+        assert await db.get_active_offer(uid_a) is None
+
         print("mongo redeem checks passed")
     finally:
-        await db.db.coupons.delete_many({"code": {"$in": codes}})
-        await db.db.users.delete_many(
-            {"telegram_id": {"$in": [uid_a, uid_b, -9003, -9004]}})
+        # Users first, and each guarded: the sentinels carry inflated
+        # offer.credits, and get_stats sums offer.credits across every user
+        # document with no id filter, so a leaked sentinel shows up in the
+        # admin "Total Discount Credits" figure permanently.
+        for cleanup in (
+            lambda: db.db.users.delete_many(
+                {"telegram_id": {"$in": [uid_a, uid_b, -9003, -9004]}}),
+            lambda: db.db.coupons.delete_many(
+                {"$or": [{"code": {"$in": codes}},
+                         {"batch_at": {"$gte": started_at}}]}),
+        ):
+            try:
+                await cleanup()
+            except Exception as e:
+                print(f"cleanup failed, check the DB by hand: {e}")
 
 
 if __name__ == "__main__":
