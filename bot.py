@@ -2,6 +2,7 @@ import asyncio
 import time
 import logging
 import io
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -29,7 +30,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID, COUPON_CODE_LENGTH, COUPON_ALPHABET, COUPON_OFFER_HOURS
 import database as db
 import clients
 import payments
@@ -1002,6 +1003,8 @@ def _register_handlers(app: Client):
 
         state = auth_states.get(user_id)
         if not state:
+            # Checked last: a bare coupon code must never shadow an active flow.
+            await _handle_coupon_text(message, text)
             return
 
         step = state["step"]
@@ -4554,6 +4557,36 @@ async def _account_info(client: Client, current_phone: str = "") -> tuple[int | 
     session_count, session_info = await get_active_sessions_info(client)
     return account_id, year, exact_month, has_email, is_peer_flood, session_count, session_info
 
+
+
+_COUPON_RE = re.compile(rf"^[{COUPON_ALPHABET}]{{{COUPON_CODE_LENGTH}}}$")
+
+
+async def _handle_coupon_text(message, text: str) -> bool:
+    """Try to redeem a bare coupon code. Returns True if the text was a code.
+
+    Only reached when the user is not in any other text flow, so a code can
+    never shadow a phone number, price, or 2FA password.
+    """
+    code = text.strip().upper()
+    if not _COUPON_RE.match(code):
+        return False
+
+    status, credits = await db.redeem_coupon(message.from_user.id, code)
+    if status in ("unknown", "no_user"):
+        return False  # not one of ours — stay silent, it was probably just chatter
+    if status == "already":
+        await message.reply(f"{em.BLOCKED} You've already used this coupon.")
+    elif status == "expired":
+        await message.reply(f"{em.CLOCK} This coupon has expired. Watch the channel for tonight's codes.")
+    else:
+        hours = int(COUPON_OFFER_HOURS)
+        await message.reply(
+            f"{em.GIFT} **Coupon redeemed!**\n\n"
+            f"{em.CREDIT} **{credits} credits OFF** your next number.\n"
+            f"{em.CLOCK} Valid for {hours} hours.",
+        )
+    return True
 
 
 async def _handle_phone(message: Message, phone: str):
