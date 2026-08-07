@@ -112,22 +112,23 @@ git commit -m "feat(config): add postable channel id and coupon knobs"
 - Test: `test_coupons.py` (create)
 
 **Interfaces:**
-- Consumes: `COUPON_ALPHABET`, `COUPON_CODE_LENGTH`, `COUPON_COUNT` from Task 1
-- Produces: `generate_coupon_code(length: int | None = None) -> str`, `_better_offer_credits(existing: dict | None, rolled: int) -> int`
+- Consumes: `COUPON_ALPHABET`, `COUPON_CODE_LENGTH` from Task 1
+- Produces: `generate_coupon_code(length: int | None = None) -> str`
 
 - [ ] **Step 1: Write the failing check**
 
 Create `test_coupons.py`:
 
 ```python
-"""Self-check for coupon code format and best-of offer logic.
+"""Self-checks for the coupon system.
 
 Run: python3 test_coupons.py    (no test framework needed)
-"""
-from datetime import datetime, timedelta, timezone
 
+The redeem path needs a real MongoDB and is added in Task 3; it skips when
+MONGODB_URI is unset or unreachable.
+"""
 from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
-from database import generate_coupon_code, _better_offer_credits
+from database import generate_coupon_code
 
 
 def test_code_format():
@@ -139,25 +140,13 @@ def test_code_format():
         assert not (set(c) & set("O0I1")), f"ambiguous glyph in {c}"
 
 
-def test_better_offer_credits():
-    now = datetime.now(timezone.utc)
-    live = {"credits": 7, "expires_at": now + timedelta(hours=3)}
-    dead = {"credits": 9, "expires_at": now - timedelta(hours=1)}
-    naive_live = {"credits": 8, "expires_at": (now + timedelta(hours=2)).replace(tzinfo=None)}
-
-    assert _better_offer_credits(None, 4) == 4, "no offer -> use the roll"
-    assert _better_offer_credits(live, 9) == 9, "higher roll wins"
-    assert _better_offer_credits(live, 2) == 7, "must not downgrade a live offer"
-    assert _better_offer_credits(live, 7) == 7, "tie keeps the value"
-    assert _better_offer_credits(dead, 3) == 3, "expired offer must not count"
-    assert _better_offer_credits(naive_live, 2) == 8, "naive mongo datetime is UTC"
-    assert _better_offer_credits({"credits": 9, "expires_at": now + timedelta(hours=1),
-                                  "used": True}, 3) == 3, "used offer must not count"
+def test_code_length_override():
+    assert len(generate_coupon_code(10)) == 10
 
 
 if __name__ == "__main__":
     test_code_format()
-    test_better_offer_credits()
+    test_code_length_override()
     print("coupon checks passed")
 ```
 
@@ -166,9 +155,9 @@ if __name__ == "__main__":
 Run: `cd /root/OTPBOT && python3 test_coupons.py`
 Expected: `ImportError: cannot import name 'generate_coupon_code' from 'database'`
 
-- [ ] **Step 3: Implement both helpers**
+- [ ] **Step 3: Implement the generator**
 
-Append to `database.py`. Note `secrets` and `string` are not currently imported — use `secrets.choice` (already-safe randomness, no new dependency):
+Append to `database.py`. Note `secrets` is not currently imported — use `secrets.choice` (already-safe randomness, no new dependency):
 
 ```python
 # ── Coupons ──
@@ -185,23 +174,6 @@ def generate_coupon_code(length: int | None = None) -> str:
 
     n = COUPON_CODE_LENGTH if length is None else length
     return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(n))
-
-
-def _better_offer_credits(existing: dict | None, rolled: int) -> int:
-    """The discount to grant: the roll, or the existing live offer if it is bigger.
-
-    An expired or already-used offer does not count, so it never blocks a roll.
-    """
-    if not existing or existing.get("used"):
-        return rolled
-    expires_at = existing.get("expires_at")
-    if not expires_at:
-        return rolled
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= datetime.now(timezone.utc):
-        return rolled
-    return max(rolled, int(existing.get("credits", 0)))
 ```
 
 - [ ] **Step 4: Run the check to verify it passes**
@@ -213,7 +185,7 @@ Expected: `coupon checks passed`
 
 ```bash
 git add database.py test_coupons.py
-git commit -m "feat(db): add coupon code generator and best-of offer helper"
+git commit -m "feat(db): add coupon code generator"
 ```
 
 ---
@@ -224,7 +196,7 @@ git commit -m "feat(db): add coupon code generator and best-of offer helper"
 - Modify: `database.py` (the `# ── Coupons ──` section from Task 2), `database.py:939-969` (`ensure_indexes`)
 
 **Interfaces:**
-- Consumes: `generate_coupon_code`, `_better_offer_credits` from Task 2; `COUPON_*` from Task 1
+- Consumes: `generate_coupon_code` from Task 2; `COUPON_*` from Task 1
 - Produces:
   - `async create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]`
   - `async redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]` returning `(status, credits)` where status is one of `"ok"`, `"unknown"`, `"expired"`, `"already"` and `credits` is the effective discount on `"ok"` else `0`
@@ -242,12 +214,11 @@ Insert into `ensure_indexes()` after the `used_tx` index at `database.py:967`:
 
 - [ ] **Step 2: Implement batch creation**
 
-Append to the Coupons section. The unique index turns a generation collision into a `DuplicateKeyError` we retry, rather than a silent overwrite:
+Append to the Coupons section. `DuplicateKeyError` is already imported at the top of `database.py` (line 5) — do not re-import it. The unique index turns a generation collision into a `DuplicateKeyError` we retry, rather than a silent overwrite:
 
 ```python
 async def create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]:
     """Generate and insert a fresh batch of coupon codes. Returns the codes."""
-    from pymongo.errors import DuplicateKeyError
     from config import COUPON_COUNT, COUPON_TTL_HOURS
 
     n = COUPON_COUNT if count is None else count
@@ -305,18 +276,35 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
         return "expired", 0
 
     rolled = random.randint(COUPON_MIN_CREDITS, COUPON_MAX_CREDITS)
-    user = await get_user(telegram_id)
-    credits = _better_offer_credits((user or {}).get("offer"), rolled)
+    expires_at = now + timedelta(hours=COUPON_OFFER_HOURS)
 
+    # Single aggregation-pipeline update so the best-of comparison happens
+    # server-side. A read-then-write here would let two codes redeemed at the
+    # same instant clobber each other's discount.
     await db.users.update_one(
         {"telegram_id": telegram_id},
-        {"$set": {"offer": {
-            "credits": credits,
+        [{"$set": {"offer": {
+            "credits": {"$let": {
+                "vars": {"cur": {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$offer.used", False]}, True]},
+                        {"$gt": [{"$ifNull": ["$offer.expires_at", now]}, now]},
+                    ]},
+                    {"$ifNull": ["$offer.credits", 0]},
+                    0,
+                ]}},
+                "in": {"$max": [rolled, "$$cur"]},
+            }},
             "granted_at": now,
-            "expires_at": now + timedelta(hours=COUPON_OFFER_HOURS),
-        }}},
+            "expires_at": expires_at,
+        }}}],
     )
     _invalidate_user_cache(telegram_id)
+
+    # Read back the value the server actually stored, so the reply cannot
+    # disagree with the database after a concurrent redemption.
+    user = await get_user(telegram_id)
+    credits = int(((user or {}).get("offer") or {}).get("credits", rolled))
     return "ok", credits
 ```
 
@@ -338,15 +326,110 @@ async def set_last_coupon_batch_date(day: str) -> None:
     )
 ```
 
-- [ ] **Step 5: Verify it imports and the check still passes**
+- [ ] **Step 5: Add the Mongo-backed redeem check**
+
+Append to `test_coupons.py`. This is the real verification of the atomic claim and the best-of rule; it skips when no database is reachable so the file always runs:
+
+```python
+async def _mongo_available() -> bool:
+    from config import MONGODB_URI
+    if not MONGODB_URI:
+        return False
+    import database as db
+    try:
+        await db.client.admin.command("ping")
+        return True
+    except Exception:
+        return False
+
+
+async def test_redeem_against_mongo():
+    """Exercise the real redeem path: once-per-user, best-of, expiry."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    import database as db
+
+    if not await _mongo_available():
+        print("skipped: no MongoDB reachable (MONGODB_URI unset or down)")
+        return
+
+    uid_a, uid_b = -9001, -9002
+    try:
+        codes = await db.create_coupon_batch(count=3)
+        assert len(codes) == 3, codes
+        code = codes[0]
+
+        # First redemption succeeds and grants an offer.
+        status, credits = await db.redeem_coupon(uid_a, code)
+        assert status == "ok", status
+        assert 1 <= credits <= 10, credits
+        offer = (await db.get_user(uid_a))["offer"]
+        assert offer["credits"] == credits
+
+        # Same user, same code: refused, offer untouched.
+        again, zero = await db.redeem_coupon(uid_a, code)
+        assert again == "already", again
+        assert zero == 0
+        assert (await db.get_user(uid_a))["offer"]["credits"] == credits
+
+        # A different user redeems the same code fine.
+        status_b, _ = await db.redeem_coupon(uid_b, code)
+        assert status_b == "ok", status_b
+
+        # Best-of: a big live offer is never downgraded by a smaller roll.
+        now = datetime.now(timezone.utc)
+        await db.db.users.update_one(
+            {"telegram_id": uid_a},
+            {"$set": {"offer": {"credits": 99, "granted_at": now,
+                                "expires_at": now + timedelta(hours=5)}}},
+        )
+        db._invalidate_user_cache(uid_a)
+        _, kept = await db.redeem_coupon(uid_a, codes[1])
+        assert kept == 99, f"downgraded a live offer to {kept}"
+
+        # An expired offer must not block a fresh roll.
+        await db.db.users.update_one(
+            {"telegram_id": uid_a},
+            {"$set": {"offer": {"credits": 99, "granted_at": now,
+                                "expires_at": now - timedelta(hours=1)}}},
+        )
+        db._invalidate_user_cache(uid_a)
+        _, fresh = await db.redeem_coupon(uid_a, codes[2])
+        assert 1 <= fresh <= 10, f"expired offer leaked through: {fresh}"
+
+        # Unknown and expired codes are distinguished.
+        assert (await db.redeem_coupon(uid_a, "ZZZZZZ"))[0] == "unknown"
+        await db.db.coupons.update_one(
+            {"code": code}, {"$set": {"expires_at": now - timedelta(hours=1)}})
+        assert (await db.redeem_coupon(-9003, code))[0] == "expired"
+        print("mongo redeem checks passed")
+    finally:
+        await db.db.coupons.delete_many({"code": {"$in": codes}})
+        await db.db.users.delete_many({"telegram_id": {"$in": [uid_a, uid_b, -9003]}})
+```
+
+Extend the `__main__` block to run it:
+
+```python
+if __name__ == "__main__":
+    import asyncio
+    test_code_format()
+    test_code_length_override()
+    asyncio.run(test_redeem_against_mongo())
+    print("coupon checks passed")
+```
+
+- [ ] **Step 6: Verify it imports and the checks pass**
 
 Run: `cd /root/OTPBOT && python3 -c "import database" && python3 test_coupons.py`
-Expected: no output from the import, then `coupon checks passed`
+Expected: no output from the import, then either `mongo redeem checks passed` or the `skipped:` line, followed by `coupon checks passed`. A traceback is a failure — fix it.
 
-- [ ] **Step 6: Commit**
+`db.client` and `db.db` are the correct attribute names (`database.py:9-10`), verified when this plan was written.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add database.py
+git add database.py test_coupons.py
 git commit -m "feat(db): add coupon batch creation, atomic redeem, and index"
 ```
 
@@ -604,4 +687,9 @@ git commit -m "feat: post nightly coupon batch to the updates channel"
 
 **Placeholder scan:** no TBD/TODO; every code step has literal code; Task 4 Step 4 gives a concrete fallback if an emoji name is absent.
 
-**Type consistency:** `redeem_coupon` returns `tuple[str, int]` in Task 3 and is unpacked as `status, credits` in Task 4. `_better_offer_credits(existing, rolled) -> int` matches its Task 2 definition and its Task 3 call. `create_coupon_batch() -> list[str]` matches `post_coupon_batch(bot, codes: list[str])`. Batch date is a `YYYY-MM-DD` string in both the getter/setter and the processor comparison.
+**Type consistency:** `redeem_coupon` returns `tuple[str, int]` in Task 3 and is unpacked as `status, credits` in Task 4. `generate_coupon_code(length=None) -> str` matches its Task 2 definition and its Task 3 call. `create_coupon_batch() -> list[str]` matches `post_coupon_batch(bot, codes: list[str])`. Batch date is a `YYYY-MM-DD` string in both the getter/setter and the processor comparison.
+
+**Amendments during execution** (both ruled by the human partner before Task 1):
+
+1. The best-of offer upsert in Task 3 is a single aggregation-pipeline `update_one` computing `$max` server-side, not a read-then-write. The pure `_better_offer_credits` helper the earlier draft used is gone — the comparison lives in Mongo now, so a helper nothing calls would be dead code.
+2. No MongoDB is reachable in this environment (`MONGODB_URI` unset). Task 2's check covers code format only; Task 3 adds a Mongo-backed redeem check that skips cleanly when no database is available, so the suite passes either way and does real verification wherever a database exists.
