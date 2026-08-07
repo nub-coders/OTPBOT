@@ -54,7 +54,10 @@ This codebase keeps large single-purpose modules (`bot.py`, `database.py`); the 
 # the raw @username / -100 chat id. Empty disables the coupon broadcast.
 _updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
 if _updates_id.startswith(("https://t.me/", "http://t.me/")):
-    _updates_id = _updates_id.rstrip("/").rsplit("/", 1)[-1]
+    # Keep the whole post-host path as one string: a multi-segment path like
+    # /joinchat/AAAA then fails the username check below instead of passing
+    # its last segment off as a valid @username.
+    _updates_id = _updates_id.split("/", 3)[-1].rstrip("/")
 _updates_id = _updates_id.lstrip("@")
 if _updates_id.lstrip("-").isdigit():
     UPDATES_CHANNEL_ID = _updates_id
