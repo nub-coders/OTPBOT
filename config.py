@@ -33,6 +33,19 @@ elif _updates_raw:
 else:
     UPDATES_CHANNEL = ""
 
+# Postable form of the updates channel. UPDATES_CHANNEL above is a t.me URL
+# used for an inline button and cannot be passed to send_message; this holds
+# the raw @username / -100 chat id. Empty disables the coupon broadcast.
+_updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
+if _updates_id.startswith(("https://t.me/", "http://t.me/")):
+    _updates_id = "@" + _updates_id.rstrip("/").rsplit("/", 1)[-1]
+if _updates_id.lstrip("-").isdigit():
+    UPDATES_CHANNEL_ID = _updates_id
+elif _updates_id:
+    UPDATES_CHANNEL_ID = _updates_id if _updates_id.startswith("@") else f"@{_updates_id}"
+else:
+    UPDATES_CHANNEL_ID = ""
+
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 
@@ -86,6 +99,20 @@ OFFER_GRANT_CHANCE = float(os.getenv("OFFER_GRANT_CHANCE", "1.0"))
 OFFER_RECENT_PURCHASE_DAYS = int(os.getenv("OFFER_RECENT_PURCHASE_DAYS", "14"))
 OFFER_DISCOUNT_SKEW = float(os.getenv("OFFER_DISCOUNT_SKEW", "31.387447433766166"))
 OFFER_GRANT_INTERVAL_SECONDS = int(os.getenv("OFFER_GRANT_INTERVAL_SECONDS", "300"))
+
+# ── Nightly coupon codes ──
+# COUPON_COUNT codes are posted to UPDATES_CHANNEL_ID at 00:00 UTC. Any user
+# may redeem any code once; a redemption grants a discount offer worth a
+# random COUPON_MIN_CREDITS..COUPON_MAX_CREDITS credits off for
+# COUPON_OFFER_HOURS. Codes stop working COUPON_TTL_HOURS after posting.
+# The alphabet excludes O/0/I/1 so a mistyped code cannot hit another coupon.
+COUPON_COUNT = int(os.getenv("COUPON_COUNT", "10"))
+COUPON_CODE_LENGTH = int(os.getenv("COUPON_CODE_LENGTH", "6"))
+COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
+COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
+COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
+COUPON_MAX_CREDITS = int(os.getenv("COUPON_MAX_CREDITS", "10"))
+COUPON_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},
