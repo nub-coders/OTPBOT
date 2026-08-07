@@ -2,8 +2,8 @@
 
 Run: python3 test_coupons.py    (no test framework needed)
 
-The redeem path needs a real MongoDB and is added in Task 3; it skips when
-MONGODB_URI is unset or unreachable.
+The redeem checks need a real MongoDB and skip when none is reachable; the
+format checks run anywhere.
 """
 from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
 from database import generate_coupon_code
@@ -40,8 +40,132 @@ def test_matches_redeem_regex():
         assert pattern.match(generate_coupon_code())
 
 
+async def _mongo_available() -> bool:
+    """Whether a real MongoDB is reachable, decided in bounded time.
+
+    Not db.client: it carries the default 30s serverSelectionTimeoutMS, so
+    probing it with no database stalls the run for 30s before the skip prints.
+    The retries are for mongodb+srv:// DNS, which resolves slowly often enough
+    that a single short ping would skip a working cluster.
+    """
+    import motor.motor_asyncio
+    from config import MONGODB_URI
+
+    if not MONGODB_URI:
+        return False
+    probe = None
+    try:
+        # Construction itself raises on a malformed URI, so it lives in the try.
+        probe = motor.motor_asyncio.AsyncIOMotorClient(
+            MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+        for _ in range(3):
+            try:
+                await probe.admin.command("ping")
+                return True
+            except Exception:
+                continue  # transient DNS / server selection: retry the ping
+        return False
+    except Exception:
+        return False
+    finally:
+        if probe is not None:
+            probe.close()
+
+
+async def test_redeem_against_mongo():
+    """Exercise the real redeem path: once-per-user, best-of, expiry."""
+    from datetime import datetime, timedelta, timezone
+    from config import COUPON_MIN_CREDITS, COUPON_MAX_CREDITS
+    import database as db
+
+    if not await _mongo_available():
+        print("skipped: no MongoDB reachable")
+        return
+
+    # Negative ids can never collide with a real Telegram user.
+    uid_a, uid_b = -9001, -9002
+    # Bound to the configured range, not a literal: a retuned COUPON_MAX_CREDITS
+    # must not turn a passing check into a spurious failure.
+    big = COUPON_MAX_CREDITS + 100
+    codes = []  # bound before the try so the finally can always clean up
+    try:
+        # redeem_coupon's $set on users is not an upsert — same as set_offer and
+        # every other users write here. Production users exist by then (/start
+        # runs create_user), so the check has to create them too.
+        await db.create_user(uid_a, "coupon_test_a", "Coupon Test A")
+        await db.create_user(uid_b, "coupon_test_b", "Coupon Test B")
+
+        codes = await db.create_coupon_batch(count=3)
+        assert len(codes) == 3, codes
+        code = codes[0]
+
+        # First redemption succeeds and grants an offer.
+        status, credits = await db.redeem_coupon(uid_a, code)
+        assert status == "ok", status
+        assert COUPON_MIN_CREDITS <= credits <= COUPON_MAX_CREDITS, credits
+        offer = (await db.get_user(uid_a))["offer"]
+        assert offer["credits"] == credits
+
+        # Same user, same code: refused, offer untouched.
+        again, zero = await db.redeem_coupon(uid_a, code)
+        assert again == "already", again
+        assert zero == 0
+        assert (await db.get_user(uid_a))["offer"]["credits"] == credits
+
+        # A different user redeems the same code fine.
+        status_b, _ = await db.redeem_coupon(uid_b, code)
+        assert status_b == "ok", status_b
+
+        # Best-of: a big live offer is never downgraded by a smaller roll.
+        now = datetime.now(timezone.utc)
+        await db.db.users.update_one(
+            {"telegram_id": uid_a},
+            {"$set": {"offer": {"credits": big, "granted_at": now,
+                                "expires_at": now + timedelta(hours=5)}}},
+        )
+        db._invalidate_user_cache(uid_a)
+        _, kept = await db.redeem_coupon(uid_a, codes[1])
+        assert kept == big, f"downgraded a live offer to {kept}"
+
+        # An expired offer must not block a fresh roll.
+        await db.db.users.update_one(
+            {"telegram_id": uid_a},
+            {"$set": {"offer": {"credits": big, "granted_at": now,
+                                "expires_at": now - timedelta(hours=1)}}},
+        )
+        db._invalidate_user_cache(uid_a)
+        _, fresh = await db.redeem_coupon(uid_a, codes[2])
+        assert COUPON_MIN_CREDITS <= fresh <= COUPON_MAX_CREDITS, (
+            f"expired offer leaked through: {fresh}")
+
+        # A used offer must not block a fresh roll either — consume_offer sets
+        # offer.used, and get_active_offer treats that as dead.
+        await db.db.users.update_one(
+            {"telegram_id": uid_b},
+            {"$set": {"offer": {"credits": big, "granted_at": now, "used": True,
+                                "expires_at": now + timedelta(hours=5)}}},
+        )
+        db._invalidate_user_cache(uid_b)
+        _, unused = await db.redeem_coupon(uid_b, codes[1])
+        assert COUPON_MIN_CREDITS <= unused <= COUPON_MAX_CREDITS, (
+            f"used offer leaked through: {unused}")
+
+        # Unknown and expired codes are distinguished. The unknown code uses a
+        # glyph outside COUPON_ALPHABET so it can never collide with a real one.
+        assert (await db.redeem_coupon(uid_a, "ZZZZ0O"))[0] == "unknown"
+        await db.db.coupons.update_one(
+            {"code": code}, {"$set": {"expires_at": now - timedelta(hours=1)}})
+        assert (await db.redeem_coupon(-9003, code))[0] == "expired"
+        print("mongo redeem checks passed")
+    finally:
+        await db.db.coupons.delete_many({"code": {"$in": codes}})
+        await db.db.users.delete_many({"telegram_id": {"$in": [uid_a, uid_b, -9003]}})
+
+
 if __name__ == "__main__":
+    import asyncio
     test_code_format()
     test_keyspace_is_brute_force_resistant()
     test_matches_redeem_regex()
+    asyncio.run(test_redeem_against_mongo())
     print("coupon checks passed")

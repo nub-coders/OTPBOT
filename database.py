@@ -6,7 +6,12 @@ from pymongo.errors import DuplicateKeyError
 from config import MONGODB_URI, ADMIN_IDS, MODERATOR_IDS, USDT_TO_INR, SELLER_PAYOUT_PERCENT
 from utils import detect_country
 
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
+# An empty MONGODB_URI raises ConfigurationError("Empty host") right here, at
+# import, which takes down anything that merely imports this module (the
+# offline coupon self-checks, for one). Fall back to the conventional local
+# default so the import always succeeds; a misconfigured deployment then fails
+# on its first query instead of at import.
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI or "mongodb://127.0.0.1:27017")
 db = client.otpbot
 
 # ponytail: per-task user cache. The verified decorator pre-fetches user once,
@@ -965,6 +970,9 @@ async def ensure_indexes():
     # Crypto deposits: one credit per tx hash. Unique index makes claim_tx's
     # insert the atomic gate against double-credit races.
     await db.used_tx.create_index("tx_hash", unique=True, name="uniq_used_tx")
+    # Coupons: code is the redeem lookup key and the generation collision gate.
+    await db.coupons.create_index("code", unique=True, name="uniq_coupon_code")
+    await db.coupons.create_index("expires_at")
     await db.withdrawal_requests.create_index("created_at")
     await db.payments.create_index("created_at")
 
@@ -1939,4 +1947,109 @@ def generate_coupon_code() -> str:
     from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
 
     return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(COUPON_CODE_LENGTH))
+
+
+async def create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]:
+    """Generate and insert a fresh batch of coupon codes. Returns the codes."""
+    from config import COUPON_COUNT, COUPON_TTL_HOURS
+
+    n = COUPON_COUNT if count is None else count
+    ttl = COUPON_TTL_HOURS if ttl_hours is None else ttl_hours
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=ttl)
+
+    codes: list[str] = []
+    for _ in range(n):
+        # The unique index turns a generation collision into a DuplicateKeyError
+        # we retry, rather than a silent overwrite of a live code.
+        for _attempt in range(10):
+            code = generate_coupon_code()
+            try:
+                await db.coupons.insert_one({
+                    "code": code,
+                    "batch_at": now,
+                    "expires_at": expires_at,
+                    "redeemed_by": [],
+                })
+            except DuplicateKeyError:
+                continue
+            codes.append(code)
+            break
+    return codes
+
+
+async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
+    """Redeem a coupon and grant a discount offer.
+
+    Returns (status, credits): status is "ok" | "unknown" | "expired" | "already";
+    credits is the effective discount on success, else 0.
+
+    The claim is one update_one so the once-per-user check and the claim cannot
+    interleave — a double-tap can never grant two offers.
+    """
+    import random
+    from config import COUPON_MIN_CREDITS, COUPON_MAX_CREDITS, COUPON_OFFER_HOURS
+
+    code = code.strip().upper()
+    now = datetime.now(timezone.utc)
+
+    claim = await db.coupons.update_one(
+        {"code": code, "expires_at": {"$gt": now}, "redeemed_by": {"$ne": telegram_id}},
+        {"$addToSet": {"redeemed_by": telegram_id}},
+    )
+    if claim.matched_count == 0:
+        # Nothing was claimed — read once more only to word the reply.
+        doc = await db.coupons.find_one({"code": code})
+        if not doc:
+            return "unknown", 0
+        if telegram_id in doc.get("redeemed_by", []):
+            return "already", 0
+        return "expired", 0
+
+    rolled = random.randint(COUPON_MIN_CREDITS, COUPON_MAX_CREDITS)
+    expires_at = now + timedelta(hours=COUPON_OFFER_HOURS)
+
+    # Single aggregation-pipeline update so the best-of comparison happens
+    # server-side. A read-then-write here would let two codes redeemed at the
+    # same instant clobber each other's discount. The "cur" condition mirrors
+    # get_active_offer: a used or expired offer counts as 0, so it cannot block
+    # a fresh roll.
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        [{"$set": {"offer": {
+            "credits": {"$let": {
+                "vars": {"cur": {"$cond": [
+                    {"$and": [
+                        {"$ne": [{"$ifNull": ["$offer.used", False]}, True]},
+                        {"$gt": [{"$ifNull": ["$offer.expires_at", now]}, now]},
+                    ]},
+                    {"$ifNull": ["$offer.credits", 0]},
+                    0,
+                ]}},
+                "in": {"$max": [rolled, "$$cur"]},
+            }},
+            "granted_at": now,
+            "expires_at": expires_at,
+        }}}],
+    )
+    _invalidate_user_cache(telegram_id)
+
+    # Read back the value the server actually stored, so the reply cannot
+    # disagree with the database after a concurrent redemption.
+    user = await get_user(telegram_id)
+    credits = int(((user or {}).get("offer") or {}).get("credits", rolled))
+    return "ok", credits
+
+
+async def get_last_coupon_batch_date() -> str:
+    doc = await db.system.find_one({"_id": "coupon_batch"})
+    return (doc or {}).get("day", "")
+
+
+async def set_last_coupon_batch_date(day: str) -> None:
+    await db.system.update_one(
+        {"_id": "coupon_batch"},
+        {"$set": {"day": day, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
 
