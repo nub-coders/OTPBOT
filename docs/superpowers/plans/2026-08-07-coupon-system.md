@@ -1,0 +1,607 @@
+# Coupon System Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** At 00:00 UTC the bot posts 10 coupon codes to the support channel; a user types a code in chat and gets a discount offer worth a random 1–10 credits off, valid 6 hours.
+
+**Architecture:** A new `coupons` MongoDB collection stores one document per code with a `redeemed_by` array. Redemption is a single atomic `update_one` that both checks once-per-user and claims. A background task in main.py posts the nightly batch, guarded by a `system` document so restarts don't double-post. The granted offer reuses the existing offer schema untouched, so `apply_discount` / `offer_banner` / `consume_offer` / `restore_offer` keep working as-is.
+
+**Tech Stack:** Python 3, kurigram (Pyrogram fork, imported as `pyrogram`), motor (async MongoDB), python-dotenv. No test framework is installed — checks are `assert`-based `__main__` self-checks run with `python3`.
+
+## Global Constraints
+
+- All datetimes are UTC and timezone-aware: `datetime.now(timezone.utc)`. Mongo returns naive datetimes — normalize with `.replace(tzinfo=timezone.utc)` before comparing, matching `get_active_offer` at `database.py:255`.
+- Code alphabet is exactly `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no `O`, `0`, `I`, `1`). Code length is 6.
+- Coupon lifetime 24h from batch time. Offer lifetime 6h from redemption. Reward `random.randint(1, 10)`.
+- Collision rule: keep the higher discount, always reset `expires_at` to 6h out.
+- Do not call `db.can_grant_offer()` on the coupon path — its 24h cooldown belonged to the removed daily drop.
+- The channel post must never contain reward amounts.
+- Reuse the existing offer document shape from `set_offer` (`database.py:334`): keys `credits`, `granted_at`, `expires_at`, and optional `used`.
+- After every `db.users` write, call `_invalidate_user_cache(telegram_id)` — see `consume_offer` at `database.py:268`.
+- No new dependencies.
+
+---
+
+## File Structure
+
+| File | Responsibility | Change |
+|---|---|---|
+| `config.py` | `UPDATES_CHANNEL_ID` postable target + `COUPON_*` knobs | Modify |
+| `database.py` | `coupons` collection: generate, insert, atomic redeem, best-of offer upsert, batch bookkeeping, index | Modify |
+| `bot.py` | bare-code detection in `on_text`, redemption reply, `post_coupon_batch` channel message | Modify |
+| `main.py` | `coupon_processor` background task + wiring | Modify |
+| `test_coupons.py` | assert-based self-check for code format and best-of logic | Create |
+
+This codebase keeps large single-purpose modules (`bot.py`, `database.py`); the plan follows that rather than introducing a new package.
+
+---
+
+### Task 1: Config
+
+**Files:**
+- Modify: `config.py:26-34` (extend the `_updates_raw` block), `config.py` (append `COUPON_*` near the `OFFER_*` block)
+
+**Interfaces:**
+- Produces: `UPDATES_CHANNEL_ID: str` (postable `@username` or `-100…`, `""` when absent), `COUPON_COUNT: int`, `COUPON_CODE_LENGTH: int`, `COUPON_TTL_HOURS: float`, `COUPON_OFFER_HOURS: float`, `COUPON_MIN_CREDITS: int`, `COUPON_MAX_CREDITS: int`, `COUPON_ALPHABET: str`
+
+- [ ] **Step 1: Add the postable channel id**
+
+`UPDATES_CHANNEL` stays exactly as it is (a `t.me` URL for the keyboard button). Add a second derived value below the existing `else: UPDATES_CHANNEL = ""` at `config.py:34`:
+
+```python
+# Postable form of the updates channel. UPDATES_CHANNEL above is a t.me URL
+# used for an inline button and cannot be passed to send_message; this holds
+# the raw @username / -100 chat id. Empty disables the coupon broadcast.
+_updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
+if _updates_id.startswith(("https://t.me/", "http://t.me/")):
+    _updates_id = "@" + _updates_id.rstrip("/").rsplit("/", 1)[-1]
+if _updates_id.lstrip("-").isdigit():
+    UPDATES_CHANNEL_ID = _updates_id
+elif _updates_id:
+    UPDATES_CHANNEL_ID = _updates_id if _updates_id.startswith("@") else f"@{_updates_id}"
+else:
+    UPDATES_CHANNEL_ID = ""
+```
+
+- [ ] **Step 2: Add the coupon knobs**
+
+Append after the `OFFER_*` block (ends `config.py:88`):
+
+```python
+# ── Nightly coupon codes ──
+# COUPON_COUNT codes are posted to UPDATES_CHANNEL_ID at 00:00 UTC. Any user
+# may redeem any code once; a redemption grants a discount offer worth a
+# random COUPON_MIN_CREDITS..COUPON_MAX_CREDITS credits off for
+# COUPON_OFFER_HOURS. Codes stop working COUPON_TTL_HOURS after posting.
+# The alphabet excludes O/0/I/1 so a mistyped code cannot hit another coupon.
+COUPON_COUNT = int(os.getenv("COUPON_COUNT", "10"))
+COUPON_CODE_LENGTH = int(os.getenv("COUPON_CODE_LENGTH", "6"))
+COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
+COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
+COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
+COUPON_MAX_CREDITS = int(os.getenv("COUPON_MAX_CREDITS", "10"))
+COUPON_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+```
+
+- [ ] **Step 3: Verify it parses and resolves**
+
+Run: `cd /root/OTPBOT && python3 -c "import config; print(repr(config.UPDATES_CHANNEL), repr(config.UPDATES_CHANNEL_ID), config.COUPON_COUNT, config.COUPON_ALPHABET)"`
+Expected: the existing URL unchanged, an `@name`/`-100…`/`""` id, `10`, and the alphabet with no `O01I`.
+
+- [ ] **Step 4: Document the env var**
+
+Add to `.env.example`:
+
+```
+UPDATES_CHANNEL_ID=
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add config.py .env.example
+git commit -m "feat(config): add postable channel id and coupon knobs"
+```
+
+---
+
+### Task 2: Code generation + self-check
+
+**Files:**
+- Modify: `database.py` (append a `# ── Coupons ──` section after the Discount Offers section, which ends at `database.py:344`)
+- Test: `test_coupons.py` (create)
+
+**Interfaces:**
+- Consumes: `COUPON_ALPHABET`, `COUPON_CODE_LENGTH`, `COUPON_COUNT` from Task 1
+- Produces: `generate_coupon_code(length: int | None = None) -> str`, `_better_offer_credits(existing: dict | None, rolled: int) -> int`
+
+- [ ] **Step 1: Write the failing check**
+
+Create `test_coupons.py`:
+
+```python
+"""Self-check for coupon code format and best-of offer logic.
+
+Run: python3 test_coupons.py    (no test framework needed)
+"""
+from datetime import datetime, timedelta, timezone
+
+from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
+from database import generate_coupon_code, _better_offer_credits
+
+
+def test_code_format():
+    codes = {generate_coupon_code() for _ in range(500)}
+    assert len(codes) > 400, "generator is not random enough"
+    for c in codes:
+        assert len(c) == COUPON_CODE_LENGTH, c
+        assert set(c) <= set(COUPON_ALPHABET), c
+        assert not (set(c) & set("O0I1")), f"ambiguous glyph in {c}"
+
+
+def test_better_offer_credits():
+    now = datetime.now(timezone.utc)
+    live = {"credits": 7, "expires_at": now + timedelta(hours=3)}
+    dead = {"credits": 9, "expires_at": now - timedelta(hours=1)}
+    naive_live = {"credits": 8, "expires_at": (now + timedelta(hours=2)).replace(tzinfo=None)}
+
+    assert _better_offer_credits(None, 4) == 4, "no offer -> use the roll"
+    assert _better_offer_credits(live, 9) == 9, "higher roll wins"
+    assert _better_offer_credits(live, 2) == 7, "must not downgrade a live offer"
+    assert _better_offer_credits(live, 7) == 7, "tie keeps the value"
+    assert _better_offer_credits(dead, 3) == 3, "expired offer must not count"
+    assert _better_offer_credits(naive_live, 2) == 8, "naive mongo datetime is UTC"
+    assert _better_offer_credits({"credits": 9, "expires_at": now + timedelta(hours=1),
+                                  "used": True}, 3) == 3, "used offer must not count"
+
+
+if __name__ == "__main__":
+    test_code_format()
+    test_better_offer_credits()
+    print("coupon checks passed")
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cd /root/OTPBOT && python3 test_coupons.py`
+Expected: `ImportError: cannot import name 'generate_coupon_code' from 'database'`
+
+- [ ] **Step 3: Implement both helpers**
+
+Append to `database.py`. Note `secrets` and `string` are not currently imported — use `secrets.choice` (already-safe randomness, no new dependency):
+
+```python
+# ── Coupons ──
+#
+# Nightly codes posted to the updates channel. Any user may redeem any code
+# once; the reward is rolled at redeem time so the codes themselves carry no
+# value and are worthless to leak.
+
+
+def generate_coupon_code(length: int | None = None) -> str:
+    """A random coupon code from the unambiguous alphabet."""
+    import secrets
+    from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
+
+    n = COUPON_CODE_LENGTH if length is None else length
+    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(n))
+
+
+def _better_offer_credits(existing: dict | None, rolled: int) -> int:
+    """The discount to grant: the roll, or the existing live offer if it is bigger.
+
+    An expired or already-used offer does not count, so it never blocks a roll.
+    """
+    if not existing or existing.get("used"):
+        return rolled
+    expires_at = existing.get("expires_at")
+    if not expires_at:
+        return rolled
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return rolled
+    return max(rolled, int(existing.get("credits", 0)))
+```
+
+- [ ] **Step 4: Run the check to verify it passes**
+
+Run: `cd /root/OTPBOT && python3 test_coupons.py`
+Expected: `coupon checks passed`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add database.py test_coupons.py
+git commit -m "feat(db): add coupon code generator and best-of offer helper"
+```
+
+---
+
+### Task 3: Database layer
+
+**Files:**
+- Modify: `database.py` (the `# ── Coupons ──` section from Task 2), `database.py:939-969` (`ensure_indexes`)
+
+**Interfaces:**
+- Consumes: `generate_coupon_code`, `_better_offer_credits` from Task 2; `COUPON_*` from Task 1
+- Produces:
+  - `async create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]`
+  - `async redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]` returning `(status, credits)` where status is one of `"ok"`, `"unknown"`, `"expired"`, `"already"` and `credits` is the effective discount on `"ok"` else `0`
+  - `async get_last_coupon_batch_date() -> str` / `async set_last_coupon_batch_date(day: str) -> None` (`day` is `YYYY-MM-DD`)
+
+- [ ] **Step 1: Add the index**
+
+Insert into `ensure_indexes()` after the `used_tx` index at `database.py:967`:
+
+```python
+    # Coupons: code is the redeem lookup key and the generation collision gate.
+    await db.coupons.create_index("code", unique=True, name="uniq_coupon_code")
+    await db.coupons.create_index("expires_at")
+```
+
+- [ ] **Step 2: Implement batch creation**
+
+Append to the Coupons section. The unique index turns a generation collision into a `DuplicateKeyError` we retry, rather than a silent overwrite:
+
+```python
+async def create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]:
+    """Generate and insert a fresh batch of coupon codes. Returns the codes."""
+    from pymongo.errors import DuplicateKeyError
+    from config import COUPON_COUNT, COUPON_TTL_HOURS
+
+    n = COUPON_COUNT if count is None else count
+    ttl = COUPON_TTL_HOURS if ttl_hours is None else ttl_hours
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=ttl)
+
+    codes: list[str] = []
+    for _ in range(n):
+        for _attempt in range(10):
+            code = generate_coupon_code()
+            try:
+                await db.coupons.insert_one({
+                    "code": code,
+                    "batch_at": now,
+                    "expires_at": expires_at,
+                    "redeemed_by": [],
+                })
+            except DuplicateKeyError:
+                continue
+            codes.append(code)
+            break
+    return codes
+```
+
+- [ ] **Step 3: Implement the atomic redeem**
+
+```python
+async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
+    """Redeem a coupon and grant a discount offer.
+
+    Returns (status, credits): status is "ok" | "unknown" | "expired" | "already";
+    credits is the effective discount on success, else 0.
+
+    The claim is one update_one so the once-per-user check and the claim cannot
+    interleave — a double-tap can never grant two offers.
+    """
+    import random
+    from config import COUPON_MIN_CREDITS, COUPON_MAX_CREDITS, COUPON_OFFER_HOURS
+
+    code = code.strip().upper()
+    now = datetime.now(timezone.utc)
+
+    claim = await db.coupons.update_one(
+        {"code": code, "expires_at": {"$gt": now}, "redeemed_by": {"$ne": telegram_id}},
+        {"$addToSet": {"redeemed_by": telegram_id}},
+    )
+    if claim.matched_count == 0:
+        # Nothing was claimed — read once more only to word the reply.
+        doc = await db.coupons.find_one({"code": code})
+        if not doc:
+            return "unknown", 0
+        if telegram_id in doc.get("redeemed_by", []):
+            return "already", 0
+        return "expired", 0
+
+    rolled = random.randint(COUPON_MIN_CREDITS, COUPON_MAX_CREDITS)
+    user = await get_user(telegram_id)
+    credits = _better_offer_credits((user or {}).get("offer"), rolled)
+
+    await db.users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"offer": {
+            "credits": credits,
+            "granted_at": now,
+            "expires_at": now + timedelta(hours=COUPON_OFFER_HOURS),
+        }}},
+    )
+    _invalidate_user_cache(telegram_id)
+    return "ok", credits
+```
+
+- [ ] **Step 4: Implement batch bookkeeping**
+
+Mirrors the `system`-document pattern the removed daily drop used:
+
+```python
+async def get_last_coupon_batch_date() -> str:
+    doc = await db.system.find_one({"_id": "coupon_batch"})
+    return (doc or {}).get("day", "")
+
+
+async def set_last_coupon_batch_date(day: str) -> None:
+    await db.system.update_one(
+        {"_id": "coupon_batch"},
+        {"$set": {"day": day, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+```
+
+- [ ] **Step 5: Verify it imports and the check still passes**
+
+Run: `cd /root/OTPBOT && python3 -c "import database" && python3 test_coupons.py`
+Expected: no output from the import, then `coupon checks passed`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add database.py
+git commit -m "feat(db): add coupon batch creation, atomic redeem, and index"
+```
+
+---
+
+### Task 4: Redemption in the bot
+
+**Files:**
+- Modify: `bot.py:32` (imports), `bot.py:1003-1005` (the `if not state: return` in `on_text`)
+
+**Interfaces:**
+- Consumes: `db.redeem_coupon` from Task 3; `COUPON_CODE_LENGTH`, `COUPON_ALPHABET`, `COUPON_OFFER_HOURS` from Task 1
+- Produces: `_handle_coupon_text(message, text) -> bool` (True when the text was handled as a coupon)
+
+- [ ] **Step 1: Extend the config import**
+
+At `bot.py:32`, append to the existing `from config import ...` line:
+
+```python
+, COUPON_CODE_LENGTH, COUPON_ALPHABET, COUPON_OFFER_HOURS
+```
+
+- [ ] **Step 2: Add the handler**
+
+`bot.py` does **not** currently import `re` (it only uses `filters.regex`, which
+takes a pattern string). Add `import re` alongside the stdlib imports at the top
+of `bot.py` near `from datetime import ...` (`bot.py:7`).
+
+Then add the handler near the other `_handle_*` helpers. The regex is built from the configured alphabet so the two can't drift:
+
+```python
+_COUPON_RE = re.compile(rf"^[{COUPON_ALPHABET}]{{{COUPON_CODE_LENGTH}}}$")
+
+
+async def _handle_coupon_text(message, text: str) -> bool:
+    """Try to redeem a bare coupon code. Returns True if the text was a code.
+
+    Only reached when the user is not in any other text flow, so a code can
+    never shadow a phone number, price, or 2FA password.
+    """
+    code = text.strip().upper()
+    if not _COUPON_RE.match(code):
+        return False
+
+    status, credits = await db.redeem_coupon(message.from_user.id, code)
+    if status == "unknown":
+        return False  # not one of ours — stay silent, it was probably just chatter
+    if status == "already":
+        await message.reply(f"{em.BLOCKED} You've already used this coupon.")
+    elif status == "expired":
+        await message.reply(f"{em.CLOCK} This coupon has expired. Watch the channel for tonight's codes.")
+    else:
+        hours = int(COUPON_OFFER_HOURS)
+        await message.reply(
+            f"{em.GIFT} **Coupon redeemed!**\n\n"
+            f"{em.CREDIT} **{credits} credits OFF** your next number.\n"
+            f"{em.CLOCK} Valid for {hours} hours.",
+        )
+    return True
+```
+
+- [ ] **Step 3: Wire it into `on_text`**
+
+Replace `bot.py:1003-1005`:
+
+```python
+        state = auth_states.get(user_id)
+        if not state:
+            return
+```
+
+with:
+
+```python
+        state = auth_states.get(user_id)
+        if not state:
+            # Checked last: a bare coupon code must never shadow an active flow.
+            await _handle_coupon_text(message, text)
+            return
+```
+
+- [ ] **Step 4: Confirm the emoji names exist**
+
+`GIFT`, `CREDIT`, `CLOCK`, and `BLOCKED` are all defined in `custom_emojis.py` — verified when this plan was written. Confirm nothing has changed:
+
+Run: `cd /root/OTPBOT && python3 -c "import custom_emojis as em; [getattr(em, n) for n in ('GIFT','CREDIT','CLOCK','BLOCKED')]; print('emoji ok')"`
+Expected: `emoji ok`
+
+- [ ] **Step 5: Verify the module compiles and the regex behaves**
+
+Run:
+```bash
+cd /root/OTPBOT && python3 -m py_compile bot.py && python3 -c "
+import re
+from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
+r = re.compile(rf'^[{COUPON_ALPHABET}]{{{COUPON_CODE_LENGTH}}}$')
+assert r.match('KX7F2A'); assert not r.match('kx7f2a')
+assert not r.match('KX7F2'); assert not r.match('KX7F2AB')
+assert not r.match('KX0F2A'), '0 must not be accepted'
+assert not r.match('hello there'); print('regex ok')"
+```
+Expected: `regex ok`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add bot.py
+git commit -m "feat(bot): redeem coupon codes typed in chat"
+```
+
+---
+
+### Task 5: Nightly broadcast
+
+**Files:**
+- Modify: `bot.py` (add `post_coupon_batch`), `main.py:146` (add `coupon_processor` before `main`), `main.py:209` (wiring)
+
+**Interfaces:**
+- Consumes: `db.create_coupon_batch`, `db.get_last_coupon_batch_date`, `db.set_last_coupon_batch_date` from Task 3; `UPDATES_CHANNEL_ID`, `COUPON_TTL_HOURS` from Task 1
+- Produces: `async post_coupon_batch(bot, codes: list[str]) -> bool` in bot.py; `async coupon_processor(bot)` in main.py
+
+- [ ] **Step 1: Add the channel post to bot.py**
+
+Place next to `alert`. Import `UPDATES_CHANNEL_ID` and `COUPON_TTL_HOURS` by appending them to the `from config import ...` line at `bot.py:32`:
+
+```python
+async def post_coupon_batch(bot, codes: list[str]) -> bool:
+    """Post tonight's coupon codes to the updates channel. Returns True on success.
+
+    Codes only — never the reward amounts, which are rolled at redeem time.
+    """
+    if not UPDATES_CHANNEL_ID or not codes:
+        return False
+    listed = "\n".join(f"`{c}`" for c in codes)
+    hours = int(COUPON_TTL_HOURS)
+    try:
+        await bot.send_message(
+            UPDATES_CHANNEL_ID,
+            f"{em.GIFT} **Tonight's Coupon Codes**\n\n"
+            f"{listed}\n\n"
+            f"Send any code to the bot to claim a discount on your next number.\n"
+            f"Each code works once per user. Valid {hours}h.",
+        )
+        return True
+    except Exception as e:
+        log.error("Coupon batch post failed: %s", e)
+        return False
+```
+
+- [ ] **Step 2: Add the processor to main.py**
+
+Insert before `async def main():` at `main.py:182`, following the `refund_processor` shape:
+
+```python
+async def coupon_processor(bot):
+    """Post a fresh coupon batch once per UTC day at 00:00."""
+    import database as db
+    from bot import post_coupon_batch
+    from config import UPDATES_CHANNEL_ID
+
+    if not UPDATES_CHANNEL_ID:
+        log.info("Coupon broadcast disabled (UPDATES_CHANNEL_ID unset)")
+        return
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            today = now.strftime("%Y-%m-%d")
+            if await db.get_last_coupon_batch_date() != today:
+                codes = await db.create_coupon_batch()
+                # Recorded before the post succeeds: a missed post can be re-sent
+                # by hand, a double post cannot be taken back.
+                await db.set_last_coupon_batch_date(today)
+                posted = await post_coupon_batch(bot, codes)
+                log.info("Coupon batch %s: %d codes, posted=%s", today, len(codes), posted)
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            delay = max(60, (tomorrow - now).total_seconds())
+        except Exception as e:
+            log.error("Coupon processor error: %s", e)
+            delay = 300
+        await asyncio.sleep(delay)
+```
+
+- [ ] **Step 3: Add the datetime import to main.py**
+
+`main.py` imports only `asyncio`, `logging`, and `from pyrogram import idle`
+(`main.py:1-3`) — it has no `datetime` import, so `coupon_processor` will raise
+`NameError` without this. Add after `import logging` (`main.py:2`):
+
+```python
+from datetime import datetime, timedelta, timezone
+```
+
+Verify: `cd /root/OTPBOT && grep -n "^from datetime" main.py`
+Expected: one line showing all three names.
+
+- [ ] **Step 4: Wire the task**
+
+After `main.py:209` (`asyncio.create_task(payment_recovery_processor(bot))`), add:
+
+```python
+    asyncio.create_task(coupon_processor(bot))
+```
+
+- [ ] **Step 5: Verify everything compiles**
+
+Run: `cd /root/OTPBOT && python3 -m py_compile bot.py main.py database.py config.py && python3 test_coupons.py`
+Expected: no compile output, then `coupon checks passed`
+
+- [ ] **Step 6: Verify the once-per-day guard logically**
+
+Run:
+```bash
+cd /root/OTPBOT && python3 -c "
+from datetime import datetime, timedelta, timezone
+now = datetime(2026, 8, 7, 3, 14, tzinfo=timezone.utc)
+tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+assert tomorrow == datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc), tomorrow
+assert 0 < (tomorrow - now).total_seconds() <= 86400
+print('schedule ok')"
+```
+Expected: `schedule ok`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add bot.py main.py
+git commit -m "feat: post nightly coupon batch to the updates channel"
+```
+
+---
+
+## Self-Review
+
+**Spec coverage**
+
+| Spec section | Task |
+|---|---|
+| `coupons` collection + `redeemed_by` | 3 |
+| Unique `code` index, `expires_at` index | 3 (Step 1) |
+| Code alphabet without `O/0/I/1`, 6 chars | 1, 2 |
+| Atomic claim, no read-then-write window | 3 (Step 3) |
+| Nightly 00:00 UTC batch of 10 | 5 |
+| Restart safety via `system` doc | 3 (Step 4), 5 (Step 2) |
+| `UPDATES_CHANNEL_ID`, disabled when unset | 1, 5 |
+| Post carries no reward amounts | 5 (Step 1) |
+| Bare-code redeem checked after all flows | 4 (Step 3) |
+| Roll 1–10 server-side at redeem | 3 (Step 3) |
+| Best-of collision, 6h reset | 2, 3 |
+| `can_grant_offer` bypassed | Global Constraints; 3 never calls it |
+| Error handling: unknown/expired/already, post failure, insert collision | 3, 4, 5 |
+| Tests | 2, plus per-task verification steps |
+
+**Deviation from the spec, deliberate:** the spec's test list includes "two different users on one code both succeed" and "second redemption by the same user refused". Those need a live MongoDB, and this repo has no test database or framework. Task 2 covers the pure logic (format, best-of, expiry, used-offer) with runnable asserts; the multi-user race is enforced structurally by the unique-index + single-`update_one` claim in Task 3 and verified by the `matched_count` branch. Add a Mongo-backed test if you stand up a test database.
+
+**Placeholder scan:** no TBD/TODO; every code step has literal code; Task 4 Step 4 gives a concrete fallback if an emoji name is absent.
+
+**Type consistency:** `redeem_coupon` returns `tuple[str, int]` in Task 3 and is unpacked as `status, credits` in Task 4. `_better_offer_credits(existing, rolled) -> int` matches its Task 2 definition and its Task 3 call. `create_coupon_batch() -> list[str]` matches `post_coupon_batch(bot, codes: list[str])`. Batch date is a `YYYY-MM-DD` string in both the getter/setter and the processor comparison.
