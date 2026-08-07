@@ -331,7 +331,7 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
 
     # Before the claim, not after: the offer update below is not an upsert, so a
     # user with no document would have the code marked redeemed and get nothing.
-    # get_user is served from the per-task cache the handler already warmed.
+    # This is one extra find_one, on a path only a well-formed code reaches.
     if not await get_user(telegram_id):
         return "no_user", 0
 
@@ -356,21 +356,29 @@ async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
     # same instant clobber each other's discount.
     await db.users.update_one(
         {"telegram_id": telegram_id},
-        [{"$set": {"offer": {
-            "credits": {"$let": {
-                "vars": {"cur": {"$cond": [
-                    {"$and": [
-                        {"$ne": [{"$ifNull": ["$offer.used", False]}, True]},
-                        {"$gt": [{"$ifNull": ["$offer.expires_at", now]}, now]},
-                    ]},
-                    {"$ifNull": ["$offer.credits", 0]},
-                    0,
-                ]}},
-                "in": {"$max": [rolled, "$$cur"]},
-            }},
-            "granted_at": now,
-            "expires_at": expires_at,
-        }}}],
+        [
+            {"$set": {"offer": {
+                "credits": {"$let": {
+                    "vars": {"cur": {"$cond": [
+                        {"$and": [
+                            {"$ne": [{"$ifNull": ["$offer.used", False]}, True]},
+                            {"$gt": [{"$ifNull": ["$offer.expires_at", now]}, now]},
+                        ]},
+                        {"$ifNull": ["$offer.credits", 0]},
+                        0,
+                    ]}},
+                    "in": {"$max": [rolled, "$$cur"]},
+                }},
+                "granted_at": now,
+                "expires_at": expires_at,
+            }}},
+            # Pipeline $set MERGES into the existing offer subdocument rather
+            # than replacing it, so a `used: true` left by consume_offer would
+            # survive and make get_active_offer treat this fresh offer as
+            # spent — the user would be told they got a discount they cannot
+            # use. Verified against the live server.
+            {"$unset": "offer.used"},
+        ],
     )
     _invalidate_user_cache(telegram_id)
 
@@ -469,6 +477,23 @@ async def test_redeem_against_mongo():
         db._invalidate_user_cache(uid_a)
         _, fresh = await db.redeem_coupon(uid_a, codes[2])
         assert 1 <= fresh <= 10, f"expired offer leaked through: {fresh}"
+
+        # A used offer must not block a fresh roll either — consume_offer sets
+        # offer.used, and get_active_offer treats that as dead.
+        await db.db.users.update_one(
+            {"telegram_id": uid_b},
+            {"$set": {"offer": {"credits": 99, "granted_at": now, "used": True,
+                                "expires_at": now + timedelta(hours=5)}}},
+        )
+        db._invalidate_user_cache(uid_b)
+        _, unused = await db.redeem_coupon(uid_b, codes[1])
+        assert 1 <= unused <= 10, f"used offer leaked through: {unused}"
+        # And the granted offer must be spendable, not just correctly valued.
+        # A pipeline $set MERGES into the existing subdocument, so without an
+        # explicit $unset the old `used: true` survives and get_active_offer
+        # returns None — the user is promised a discount they cannot use.
+        assert await db.get_active_offer(uid_b) is not None, (
+            "redeemed offer is not active: offer.used survived the grant")
 
         # Unknown and expired codes are distinguished.
         assert (await db.redeem_coupon(uid_a, "ZZZZZZ"))[0] == "unknown"

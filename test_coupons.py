@@ -151,6 +151,12 @@ async def test_redeem_against_mongo():
         _, unused = await db.redeem_coupon(uid_b, codes[1])
         assert COUPON_MIN_CREDITS <= unused <= COUPON_MAX_CREDITS, (
             f"used offer leaked through: {unused}")
+        # And the granted offer must be spendable, not just correctly valued.
+        # A pipeline $set MERGES into the existing subdocument, so without an
+        # explicit $unset the old `used: true` survives and get_active_offer
+        # returns None — the user is promised a discount they cannot use.
+        assert await db.get_active_offer(uid_b) is not None, (
+            "redeemed offer is not active: offer.used survived the grant")
 
         # Unknown and expired codes are distinguished. The unknown code uses a
         # glyph outside COUPON_ALPHABET so it can never collide with a real one.
