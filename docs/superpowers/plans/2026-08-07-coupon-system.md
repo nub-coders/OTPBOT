@@ -42,7 +42,7 @@ This codebase keeps large single-purpose modules (`bot.py`, `database.py`); the 
 - Modify: `config.py:26-34` (extend the `_updates_raw` block), `config.py` (append `COUPON_*` near the `OFFER_*` block)
 
 **Interfaces:**
-- Produces: `UPDATES_CHANNEL_ID: str` (postable `@username` or `-100…`, `""` when absent), `COUPON_COUNT: int`, `COUPON_CODE_LENGTH: int`, `COUPON_TTL_HOURS: float`, `COUPON_OFFER_HOURS: float`, `COUPON_MIN_CREDITS: int`, `COUPON_MAX_CREDITS: int`, `COUPON_ALPHABET: str`
+- Produces: `UPDATES_CHANNEL_ID: str | int` (postable `@username` or `-100…` int, `""` when absent), `COUPON_COUNT: int`, `COUPON_CODE_LENGTH: int`, `COUPON_TTL_HOURS: float`, `COUPON_OFFER_HOURS: float`, `COUPON_MIN_CREDITS: int`, `COUPON_MAX_CREDITS: int`, `COUPON_ALPHABET: str`
 
 - [ ] **Step 1: Add the postable channel id**
 
@@ -51,16 +51,21 @@ This codebase keeps large single-purpose modules (`bot.py`, `database.py`); the 
 ```python
 # Postable form of the updates channel. UPDATES_CHANNEL above is a t.me URL
 # used for an inline button and cannot be passed to send_message; this holds
-# the raw @username / -100 chat id. Empty disables the coupon broadcast.
+# the raw @username / -100 chat id. Empty derives from UPDATES_CHANNEL; set
+# UPDATES_CHANNEL_ID to "-" to disable the coupon broadcast while keeping
+# the button.
 _updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
-if _updates_id.startswith(("https://t.me/", "http://t.me/")):
+if _updates_id.lower().startswith(("https://t.me/", "http://t.me/")):
     # Keep the whole post-host path as one string: a multi-segment path like
     # /joinchat/AAAA then fails the username check below instead of passing
-    # its last segment off as a valid @username.
-    _updates_id = _updates_id.split("/", 3)[-1].rstrip("/")
+    # its last segment off as a valid @username. Also cut any ?query/#fragment
+    # so a tracking-tagged URL still resolves to its channel.
+    _updates_id = _updates_id.split("/", 3)[-1].split("?", 1)[0].split("#", 1)[0].rstrip("/")
 _updates_id = _updates_id.lstrip("@")
-if _updates_id.lstrip("-").isdigit():
-    UPDATES_CHANNEL_ID = _updates_id
+if _updates_id.isascii() and re.fullmatch(r"-?\d+", _updates_id):
+    # int, not str: kurigram routes a digits-only string to a phone-number
+    # lookup (ResolvePhone) and fails; a -100… id must be an int peer.
+    UPDATES_CHANNEL_ID = int(_updates_id)
 elif (4 <= len(_updates_id) <= 32 and _updates_id.isascii()
         and _updates_id.replace("_", "").isalnum()):
     UPDATES_CHANNEL_ID = f"@{_updates_id}"
@@ -90,24 +95,52 @@ COUPON_CODE_LENGTH = max(6, int(os.getenv("COUPON_CODE_LENGTH", "6")))
 COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
 COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
 COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
-COUPON_MAX_CREDITS = int(os.getenv("COUPON_MAX_CREDITS", "10"))
+# Clamped to min: an inverted config (min > max) would otherwise burn a
+# redemption — the claim runs before the roll, and random.randint(min, max)
+# raises ValueError on an empty range, leaving the code spent with no offer.
+# Matches the bot.py:110 precedent for the offer discount.
+COUPON_MAX_CREDITS = max(int(os.getenv("COUPON_MAX_CREDITS", "10")), COUPON_MIN_CREDITS)
 COUPON_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ```
 
-- [ ] **Step 3: Verify it parses and resolves**
+- [ ] **Step 3: Add the `re` import**
+
+The digit test uses `re.fullmatch`; `config.py` imports only `os`, `dotenv`, and
+`Decimal`. Add `import re` beside `import os` at the top.
+
+- [ ] **Step 4: Verify it parses and resolves**
 
 Run: `cd /root/OTPBOT && python3 -c "import config; print(repr(config.UPDATES_CHANNEL), repr(config.UPDATES_CHANNEL_ID), config.COUPON_COUNT, config.COUPON_ALPHABET)"`
-Expected: the existing URL unchanged, an `@name`/`-100…`/`""` id, `10`, and the alphabet with no `O01I`.
+Expected: the existing URL unchanged, an `@name`/`-100…` int/`""` id, `10`, and the alphabet with no `O01I`.
 
-- [ ] **Step 4: Document the env var**
+Also confirm, for each input, that `UPDATES_CHANNEL` is byte-identical to its
+pre-change value and that a numeric id comes back as an `int`:
 
-Add to `.env.example`:
+| `UPDATES_CHANNEL_ID` env | `UPDATES_CHANNEL_ID` |
+|---|---|
+| `-1001234567890` | `-1001234567890` (int) |
+| `--123` | `""` |
+| `١٢٣٤` | `""` |
+| `-` | `""` (the off switch) |
+| `https://T.me/mychannel` | `"@mychannel"` |
+| `https://t.me/mychannel?start=x` | `"@mychannel"` |
+| `https://t.me/s/mychannel` | `""` |
+| `https://t.me/+ntOL-unWf3swYmE1` | `""` (the live `.env` value) |
+
+- [ ] **Step 5: Document the env var**
+
+Add to `.env.example`, replacing the bare `UPDATES_CHANNEL_ID=` line if Task 1
+already added one:
 
 ```
+# Postable form of the updates channel, used for the nightly coupon post.
+# Leave empty to derive it from UPDATES_CHANNEL. A private invite link
+# (t.me/+hash) cannot be derived — put the numeric -100… id here instead.
+# Set to "-" to keep the Updates button but turn the coupon post off.
 UPDATES_CHANNEL_ID=
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add config.py .env.example
@@ -626,7 +659,7 @@ async def coupon_processor(bot):
     from config import UPDATES_CHANNEL_ID
 
     if not UPDATES_CHANNEL_ID:
-        log.info("Coupon broadcast disabled (UPDATES_CHANNEL_ID unset)")
+        log.info("Coupon broadcast disabled: no postable UPDATES_CHANNEL_ID (set a @username / -100… id, or a public t.me link)")
         return
 
     while True:
@@ -709,7 +742,7 @@ git commit -m "feat: post nightly coupon batch to the updates channel"
 | Atomic claim, no read-then-write window | 3 (Step 3) |
 | Nightly 00:00 UTC batch of 10 | 5 |
 | Restart safety via `system` doc | 3 (Step 4), 5 (Step 2) |
-| `UPDATES_CHANNEL_ID`, disabled when unset | 1, 5 |
+| `UPDATES_CHANNEL_ID`, disabled when it does not resolve to a postable peer | 1, 5 |
 | Post carries no reward amounts | 5 (Step 1) |
 | Bare-code redeem checked after all flows | 4 (Step 3) |
 | Roll 1–10 server-side at redeem | 3 (Step 3) |

@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from decimal import Decimal
 
@@ -35,13 +36,22 @@ else:
 
 # Postable form of the updates channel. UPDATES_CHANNEL above is a t.me URL
 # used for an inline button and cannot be passed to send_message; this holds
-# the raw @username / -100 chat id. Empty disables the coupon broadcast.
+# the raw @username / -100 chat id. Empty derives from UPDATES_CHANNEL; set
+# UPDATES_CHANNEL_ID to "-" to disable the coupon broadcast while keeping the
+# Updates button.
 _updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
-if _updates_id.startswith(("https://t.me/", "http://t.me/")):
-    _updates_id = _updates_id.split("/", 3)[-1].rstrip("/")
+if _updates_id.lower().startswith(("https://t.me/", "http://t.me/")):
+    # Keep the whole post-host path as one string: a multi-segment path like
+    # /joinchat/AAAA then fails the username check below instead of passing its
+    # last segment off as a valid @username. Also cut any ?query/#fragment so a
+    # tracking-tagged URL still resolves to its channel.
+    _updates_id = _updates_id.split("/", 3)[-1].split("?", 1)[0].split("#", 1)[0].rstrip("/")
 _updates_id = _updates_id.lstrip("@")
-if _updates_id.lstrip("-").isdigit():
-    UPDATES_CHANNEL_ID = _updates_id
+if _updates_id.isascii() and re.fullmatch(r"-?\d+", _updates_id):
+    # int, not str: kurigram strips the "-" from a digits-only string and routes
+    # it to a phone-number lookup (ResolvePhone), which fails. A -100… id must
+    # be an int to resolve as a channel peer.
+    UPDATES_CHANNEL_ID = int(_updates_id)
 elif (4 <= len(_updates_id) <= 32 and _updates_id.isascii()
         and _updates_id.replace("_", "").isalnum()):
     UPDATES_CHANNEL_ID = f"@{_updates_id}"
@@ -119,7 +129,10 @@ COUPON_CODE_LENGTH = max(6, int(os.getenv("COUPON_CODE_LENGTH", "6")))
 COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
 COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
 COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
-COUPON_MAX_CREDITS = int(os.getenv("COUPON_MAX_CREDITS", "10"))
+# Clamped to min: an inverted config (min > max) would otherwise burn a
+# redemption — the claim runs before the roll, and random.randint(min, max)
+# raises ValueError on an empty range, leaving the code spent with no offer.
+COUPON_MAX_CREDITS = max(int(os.getenv("COUPON_MAX_CREDITS", "10")), COUPON_MIN_CREDITS)
 COUPON_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 CREDIT_PLANS = {

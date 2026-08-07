@@ -1928,11 +1928,15 @@ async def set_wa_price(phone_number: str, price: int) -> bool:
 # value and are worthless to leak.
 
 
-def generate_coupon_code(length: int | None = None) -> str:
-    """A random coupon code from the unambiguous alphabet."""
+def generate_coupon_code() -> str:
+    """A random coupon code from the unambiguous alphabet.
+
+    secrets, not random: the codes are posted publicly, and Mersenne Twister
+    state is recoverable from observed output — which would let an observer
+    derive codes that have not been posted yet.
+    """
     import secrets
     from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
 
-    n = COUPON_CODE_LENGTH if length is None else length
-    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(n))
+    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(COUPON_CODE_LENGTH))
 
