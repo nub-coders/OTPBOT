@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from pyrogram import idle
 
 logging.basicConfig(
@@ -179,6 +180,44 @@ async def payment_recovery_processor(bot):
         await asyncio.sleep(30)
 
 
+async def coupon_processor(bot):
+    """Post a fresh coupon batch once per UTC day at 00:00."""
+    import database as db
+    from bot import post_coupon_batch
+    from config import UPDATES_CHANNEL_ID
+
+    if not UPDATES_CHANNEL_ID:
+        log.info("Coupon broadcast disabled: no postable UPDATES_CHANNEL_ID (set a @username / -100… id, or a public t.me link)")
+        return
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            today = now.strftime("%Y-%m-%d")
+            # Hour gate: the day's batch is simply "missing" until it is posted,
+            # so without this a bot started at 15:00 announces "Tonight's Coupon
+            # Codes" at 15:00. The 1h window still recovers a batch missed by a
+            # restart straddling midnight; a longer outage waits for 00:00.
+            if now.hour == 0 and await db.get_last_coupon_batch_date() != today:
+                codes = await db.create_coupon_batch()
+                # Recorded before the post succeeds: a missed post can be re-sent
+                # by hand, a double post cannot be taken back.
+                await db.set_last_coupon_batch_date(today)
+                if await post_coupon_batch(bot, codes):
+                    log.info("Coupon batch %s: %d codes posted", today, len(codes))
+                else:
+                    # The codes are already live in Mongo and expire unused if
+                    # nobody ever saw them — that needs an operator's eye.
+                    log.error("Coupon batch %s: %d codes created but NOT posted",
+                              today, len(codes))
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            delay = max(60, (tomorrow - now).total_seconds())
+        except Exception as e:
+            log.error("Coupon processor error: %s", e)
+            delay = 300
+        await asyncio.sleep(delay)
+
+
 async def main():
     from bot import create_bot
     import clients
@@ -207,6 +246,7 @@ async def main():
 
     asyncio.create_task(refund_processor(bot))
     asyncio.create_task(payment_recovery_processor(bot))
+    asyncio.create_task(coupon_processor(bot))
     log.info("Background processors started.")
 
     log.info("OTP Bot is running. Press Ctrl+C to stop.")

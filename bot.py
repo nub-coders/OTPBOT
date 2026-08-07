@@ -30,7 +30,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID, COUPON_CODE_LENGTH, COUPON_ALPHABET, COUPON_OFFER_HOURS
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID, COUPON_CODE_LENGTH, COUPON_ALPHABET, COUPON_OFFER_HOURS, UPDATES_CHANNEL_ID, COUPON_TTL_HOURS
 import database as db
 import clients
 import payments
@@ -225,6 +225,29 @@ async def alert(bot: Client, text: str, reply_markup=None):
                 await bot.send_message(admin_id, text, reply_markup=reply_markup)
             except Exception as e:
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
+
+
+async def post_coupon_batch(bot, codes: list[str]) -> bool:
+    """Post tonight's coupon codes to the updates channel. Returns True on success.
+
+    Codes only — never the reward amounts, which are rolled at redeem time.
+    """
+    if not UPDATES_CHANNEL_ID or not codes:
+        return False
+    listed = "\n".join(f"`{c}`" for c in codes)
+    hours = int(COUPON_TTL_HOURS)
+    try:
+        await bot.send_message(
+            UPDATES_CHANNEL_ID,
+            f"{em.GIFT} **Tonight's Coupon Codes**\n\n"
+            f"{listed}\n\n"
+            f"Send any code to the bot to claim a discount on your next number.\n"
+            f"Each code works once per user. Valid {hours}h.",
+        )
+        return True
+    except Exception as e:
+        log.error("Coupon batch post failed: %s", e)
+        return False
 
 
 async def _wa_notify(bot: Client, text: str, reply_markup=None):
