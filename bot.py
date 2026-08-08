@@ -2,6 +2,7 @@ import asyncio
 import time
 import logging
 import io
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -29,7 +30,7 @@ from pyrogram.errors import (
 )
 from pyrogram.raw.functions.users import GetFullUser
 from decimal import Decimal
-from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID
+from config import API_ID, API_HASH, BOT_TOKEN, OTP_TIMEOUT, CREDIT_PLANS, CRYPTO_PLANS, STARS_PLANS, STARS_PER_CREDIT, SUPPORT_HANDLES, CHAT_ID, ADMIN_IDS, MODERATOR_ID, UPDATES_CHANNEL, USDT_TO_INR, TURNSTILE_SITE_KEY, VERIFY_URL, REFERRAL_BONUS, REFERRAL_VERIFY_BONUS, ENABLE_VERIFICATION, OFFER_MIN_CREDITS, OFFER_MAX_CREDITS, OFFER_MIN_HOURS, OFFER_MAX_HOURS, OFFER_GRANT_CHANCE, OFFER_RECENT_PURCHASE_DAYS, OFFER_DISCOUNT_SKEW, SELLER_PAYOUT_PERCENT, WA_ADMIN_ID, COUPON_CODE_LENGTH, COUPON_ALPHABET, COUPON_OFFER_HOURS, UPDATES_CHANNEL_ID, COUPON_TTL_HOURS
 import database as db
 import clients
 import payments
@@ -226,6 +227,29 @@ async def alert(bot: Client, text: str, reply_markup=None):
                 log.error("Failed to send alert to admin %d: %s", admin_id, e)
 
 
+async def post_coupon_batch(bot, codes: list[str]) -> bool:
+    """Post tonight's coupon codes to the updates channel. Returns True on success.
+
+    Codes only — never the reward amounts, which are rolled at redeem time.
+    """
+    if not UPDATES_CHANNEL_ID or not codes:
+        return False
+    listed = "\n".join(f"`{c}`" for c in codes)
+    hours = int(COUPON_TTL_HOURS)
+    try:
+        await bot.send_message(
+            UPDATES_CHANNEL_ID,
+            f"{em.GIFT} **Tonight's Coupon Codes**\n\n"
+            f"{listed}\n\n"
+            f"Send any code to the bot to claim a discount on your next number.\n"
+            f"Each code works once per user. Valid {hours}h.",
+        )
+        return True
+    except Exception as e:
+        log.error("Coupon batch post failed: %s", e)
+        return False
+
+
 async def _wa_notify(bot: Client, text: str, reply_markup=None):
     """WhatsApp orders are worked by one operator — notify only them.
 
@@ -277,125 +301,6 @@ async def _check_referral_reward(user_id: int, purchased_credits: int):
             log.warning("Failed to notify referrer %d of commission: %s", referrer_id, e)
 
 
-
-_daily_discount_lock = asyncio.Lock()
-# ponytail: monotonic timestamp of the last daily-discount run; 0.0 = not yet
-# checked this process, so the first check syncs from Mongo.
-_last_daily_discount_check: float = 0.0
-
-
-async def _process_daily_discounts(client):
-    """Grant random discount offers to up to 5 eligible non-admin users."""
-    try:
-        users = await db.get_all_users()
-        import random
-        random.shuffle(users)
-        granted_users = []
-        for u in users:
-            if len(granted_users) >= 5:
-                break
-            uid = u.get("telegram_id")
-            if not uid or await db.is_admin(uid):
-                continue
-            offer, granted = await maybe_grant_offer(uid)
-            if granted and offer:
-                credits_discount = offer.get("credits", 0)
-                await db.add_credits(uid, credits_discount)
-                current_credits = await db.get_credits(uid)
-
-                expires_at = offer.get("expires_at")
-                hours = 4
-                if expires_at:
-                    if expires_at.tzinfo is None:
-                        expires_at = expires_at.replace(tzinfo=timezone.utc)
-                    hours = max(1, int((expires_at - datetime.now(timezone.utc)).total_seconds() // 3600))
-                try:
-                    await client.send_message(
-                        uid,
-                        f"🎁 **Special Daily Bonus Drop!**\n\n"
-                        f"🎉 You've been awarded **{credits_discount} bonus credits**!\n"
-                        f"💰 Your new balance: **{current_credits} credits**.\n"
-                        f"⏰ Valid for the next **{hours} hours**.\n"
-                        f"Check out the catalog to buy your account now!"
-                    )
-                except Exception as e:
-                    log.warning("Could not notify user %s of daily discount: %s", uid, e)
-
-                granted_users.append({
-                    "uid": uid,
-                    "first_name": u.get("first_name", ""),
-                    "username": u.get("username", ""),
-                    "discount": credits_discount,
-                    "credits": current_credits,
-                })
-
-        if granted_users:
-            msg_blocks = [f"{em.GIFT} **Daily Discount Drop!**\n"]
-            for gu in granted_users:
-                display_name = gu["first_name"] or ""
-                username = gu["username"]
-                name_line = f"📛 Name: {display_name}"
-                user_line = f"\n👤 Username: @{username}" if username else ""
-                msg_blocks.append(
-                    f"{em.USER} **User Selected**\n"
-                    f"{em.ID_BADGE} ID: `{gu['uid']}`\n"
-                    f"{name_line}{user_line}\n"
-                    f"🎁 Bonus Granted: **+{gu['discount']} credits**\n"
-                    f"💰 Current Credits: **{gu['credits']} credits**\n"
-                )
-            announcement = "\n".join(msg_blocks)
-            await alert(client, announcement)
-    except Exception as e:
-        log.error("Error in _process_daily_discounts: %s", e)
-
-
-
-async def _check_and_trigger_daily_discounts(client):
-    """Check if 24h have passed since last daily discount run; if so, trigger background task."""
-    # ponytail: in-memory monotonic timestamp instead of Mongo round-trip per action.
-    # Falls back to Mongo on first check after restart.
-    global _last_daily_discount_check
-    now_mono = time.monotonic()
-
-    async with _daily_discount_lock:
-        if _last_daily_discount_check == 0.0:
-            # First check since process start — sync from Mongo.
-            last_run_dt = await db.get_last_daily_discount_time()
-            if last_run_dt:
-                if last_run_dt.tzinfo is None:
-                    last_run_dt = last_run_dt.replace(tzinfo=timezone.utc)
-                elapsed = (datetime.now(timezone.utc) - last_run_dt).total_seconds()
-                if elapsed < 86400:
-                    # Still in the cooldown — seed the monotonic timer with the
-                    # remaining cooldown so we don't run until 24h from the last Mongo run.
-                    _last_daily_discount_check = now_mono - elapsed
-                    return
-            # Either no last_run in Mongo or cooldown expired — run immediately.
-            _last_daily_discount_check = now_mono
-        else:
-            # Normal in-memory check.
-            elapsed = now_mono - _last_daily_discount_check
-            if elapsed < 86400:
-                return
-            _last_daily_discount_check = now_mono
-
-        # Persist timestamp to Mongo so next restart sees it.
-        await db.set_last_daily_discount_time(datetime.now(timezone.utc))
-
-    await _process_daily_discounts(client)
-
-
-def check_daily_discount(func):
-    """Decorator for Pyrogram handlers to check if 24h passed and spawn background discount task."""
-    from functools import wraps
-    @wraps(func)
-    async def wrapper(client, update, *args, **kwargs):
-        db.begin_user_cache()
-        asyncio.create_task(_check_and_trigger_daily_discounts(client))
-        return await func(client, update, *args, **kwargs)
-    return wrapper
-
-
 def verified(func):
     from functools import wraps
     @wraps(func)
@@ -403,7 +308,6 @@ def verified(func):
         # ponytail: start per-task user cache so get_user/get_credits/is_admin
         # etc hit ctx-var instead of separate Mongo round-trips.
         db.begin_user_cache()
-        asyncio.create_task(_check_and_trigger_daily_discounts(client))
 
         if VERIFICATION_ENABLED:
             tg_user = update.from_user
@@ -1122,6 +1026,8 @@ def _register_handlers(app: Client):
 
         state = auth_states.get(user_id)
         if not state:
+            # Checked last: a bare coupon code must never shadow an active flow.
+            await _handle_coupon_text(message, text)
             return
 
         step = state["step"]
@@ -1474,8 +1380,32 @@ def _register_handlers(app: Client):
             await cq.answer("Number not found.", show_alert=True)
             return
 
-        await db.set_session_status(phone, "active")
-        await cq.answer(f"{em.SUCCESS} Number re-listed for sale!")
+        if session.get("status") == "sold":
+            await cq.answer(f"{em.ERROR} Cannot re-list a sold number.", show_alert=True)
+            return
+
+        await safe_edit(cq.message, f"{em.LOADING} Verifying `{phone}` before re-listing...")
+
+        ok, error = await clients.verify_session(phone, session["session_string"])
+        if ok:
+            await db.set_session_status(phone, "active")
+            await safe_edit(cq.message,
+                f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                ]),
+            )
+        else:
+            await db.set_session_status(phone, "error", error)
+            await safe_edit(cq.message,
+                f"{em.ERROR} `{phone}` — verification failed during re-listing.\n\n"
+                f"❗ Error: `{error[:200]}`\n\n"
+                "Would you like to re-add this number?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
+                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                ]),
+            )
 
         cc = session.get("country_code", "XX")
         flag = get_country_flag(cc)
@@ -1804,25 +1734,43 @@ def _register_handlers(app: Client):
         await safe_edit(cq.message, f"{em.LOADING} Verifying `{phone}`...")
 
         ok, error = await clients.verify_session(phone, session["session_string"])
-        if ok:
-            await db.set_session_status(phone, "active")
-            await safe_edit(cq.message,
-                f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
-                ]),
-            )
+        current_status = session.get("status")
+        if current_status == "sold":
+            if ok:
+                await safe_edit(cq.message,
+                    f"{em.SUCCESS} `{phone}` — session is **valid** (remains marked as **sold**).",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
+            else:
+                await safe_edit(cq.message,
+                    f"{em.ERROR} `{phone}` — session is **invalid** (remains marked as **sold**).\n\n"
+                    f"❗ Error: `{error[:200]}`",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
         else:
-            await db.set_session_status(phone, "error", error)
-            await safe_edit(cq.message,
-                f"{em.ERROR} `{phone}` — verification failed\n\n"
-                f"❗ Error: `{error[:200]}`\n\n"
-                "Would you like to re-add this number?",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
-                    [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
-                ]),
-            )
+            if ok:
+                await db.set_session_status(phone, "active")
+                await safe_edit(cq.message,
+                    f"{em.SUCCESS} `{phone}` — session is **valid** and ready for sale!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
+            else:
+                await db.set_session_status(phone, "error", error)
+                await safe_edit(cq.message,
+                    f"{em.ERROR} `{phone}` — verification failed\n\n"
+                    f"❗ Error: `{error[:200]}`\n\n"
+                    "Would you like to re-add this number?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{em.PENDING} Re-add Number", callback_data=f"readd:{phone}", style=S.PRIMARY)],
+                        [InlineKeyboardButton(f"{em.BACK} Back", callback_data=f"num_actions:{phone}", style=S.DEFAULT)],
+                    ]),
+                )
 
     @app.on_callback_query(filters.regex(r"^readd:"))
     @verified
@@ -2162,26 +2110,36 @@ def _register_handlers(app: Client):
         else:
             buyer_block = "\n\n🛍 **Buyer Info:** None (0 bought)"
 
-        # Recent payments — most recent first.
-        payments = await db.get_user_payments(uid, limit=5)
-        if payments:
+        # Recent payments/withdrawals — most recent first.
+        transactions = await db.get_user_transactions(uid, limit=5)
+        if transactions:
             pay_lines = []
-            for p in payments:
-                p_at = p.get("created_at")
-                p_str = p_at.strftime("%Y-%m-%d %H:%M UTC") if p_at else "—"
-                amount = p.get("amount", 0)
-                currency = p.get("currency", "")
-                method = p.get("method", "—")
-                p_credits = p.get("credits", 0)
-                pay_lines.append(
-                    f"• **{amount} {currency}** ({method}) → **{p_credits}** credits — {p_str}"
-                )
+            for t in transactions:
+                t_at = t.get("created_at")
+                t_str = t_at.strftime("%Y-%m-%d %H:%M UTC") if t_at else "—"
+                if t.get("transaction_type") == "withdrawal":
+                    w_amount = t.get("amount", 0)
+                    w_method = t.get("method", "—")
+                    w_details = t.get("details", "")
+                    w_status = t.get("status", "pending")
+                    pay_lines.append(
+                        f"• 🔴 **-{w_amount} cr** (Withdrawal via {w_method} to `{w_details}`) [{w_status}] — {t_str}"
+                    )
+                else:
+                    amount = t.get("amount", 0)
+                    currency = t.get("currency", "")
+                    method = t.get("method", "—")
+                    p_credits = t.get("credits")
+                    credits_str = f" → **{p_credits}** credits" if p_credits is not None else ""
+                    pay_lines.append(
+                        f"• 🟢 **{amount} {currency}** ({method}){credits_str} — {t_str}"
+                    )
             payments_block = (
-                f"\n\n{em.RECEIPT} **Recent Payments** ({len(payments)})\n"
+                f"\n\n{em.RECEIPT} **Recent Payments & Withdrawals** ({len(transactions)})\n"
                 f"<blockquote>" + "\n".join(pay_lines) + "</blockquote>"
             )
         else:
-            payments_block = f"\n\n{em.RECEIPT} **Recent Payments:** none"
+            payments_block = f"\n\n{em.RECEIPT} **Recent Payments & Withdrawals:** none"
 
         await message.reply(
             f"{role_icon} **User Info**\n\n"
@@ -3282,9 +3240,10 @@ def _register_handlers(app: Client):
                 reply_markup=back_kb("main_menu"),
             )
         else:
+            spent_offer_at = released.get("offer_granted_at")
             if price > 0:
-                await db.save_pending_refund(user_id, phone, price)
-            restored = await db.restore_offer(user_id, delay_hours=1 if price > 0 else 0)
+                await db.save_pending_refund(user_id, phone, price, spent_offer_at)
+            restored = await db.restore_offer(user_id, spent_offer_at, delay_hours=1 if price > 0 else 0)
             offer_line = f"\n{em.GIFT} **Discount offer restored!**" if restored else ""
             await safe_edit(cq.message,
                 f"{em.UNLOCK} `{mask_phone(phone)}` released.\n\n"
@@ -4624,6 +4583,36 @@ async def _account_info(client: Client, current_phone: str = "") -> tuple[int | 
 
 
 
+_COUPON_RE = re.compile(rf"^[{COUPON_ALPHABET}]{{{COUPON_CODE_LENGTH}}}$")
+
+
+async def _handle_coupon_text(message, text: str) -> bool:
+    """Try to redeem a bare coupon code. Returns True if the text was a code.
+
+    Only reached when the user is not in any other text flow, so a code can
+    never shadow a phone number, price, or 2FA password.
+    """
+    code = text.strip().upper()
+    if not _COUPON_RE.match(code):
+        return False
+
+    status, credits = await db.redeem_coupon(message.from_user.id, code)
+    if status in ("unknown", "no_user"):
+        return False  # not one of ours — stay silent, it was probably just chatter
+    if status == "already":
+        await message.reply(f"{em.BLOCKED} You've already used this coupon.")
+    elif status == "expired":
+        await message.reply(f"{em.CLOCK} This coupon has expired. Watch the channel for tonight's codes.")
+    else:
+        hours = int(COUPON_OFFER_HOURS)
+        await message.reply(
+            f"{em.GIFT} **Coupon redeemed!**\n\n"
+            f"{em.CREDIT} **{credits} credits OFF** your next number.\n"
+            f"{em.CLOCK} Valid for {hours} hours.",
+        )
+    return True
+
+
 async def _handle_phone(message: Message, phone: str):
     user_id = message.from_user.id
     if not phone.startswith("+"):
@@ -5357,11 +5346,15 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
             return False
         log.info("Deducted %d credits and %d balance from user %d on selection", credits_deducted, balance_deducted, user_id)
 
+    # Spend the offer this purchase was actually priced against (read far above,
+    # before ~27 awaits of session work). A coupon redeemed in that window
+    # replaces the slot, and an unkeyed consume would burn the coupon instead.
+    offer_granted_at = offer.get("granted_at") if offer else None
     if offer:
-        await db.consume_offer(user_id)
+        await db.consume_offer(user_id, offer_granted_at)
 
     order_id = db.new_order_id()
-    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id)
+    clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id, offer_granted_at=offer_granted_at)
     # Assignment done — the in-memory active_requests gate now blocks other buyers,
     # so return the DB status to 'active' (release/timeout/sold paths expect it).
     await db.unreserve_session(phone)

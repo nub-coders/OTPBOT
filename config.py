@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from decimal import Decimal
 
@@ -32,6 +33,34 @@ elif _updates_raw:
     UPDATES_CHANNEL = f"https://t.me/{_updates_raw}"
 else:
     UPDATES_CHANNEL = ""
+
+# Postable form of the updates channel. UPDATES_CHANNEL above is a t.me URL
+# used for an inline button and cannot be passed to send_message; this holds
+# the raw @username / -100 chat id. Empty derives from UPDATES_CHANNEL; set
+# UPDATES_CHANNEL_ID to "-" to disable the coupon broadcast while keeping the
+# Updates button.
+_updates_id = os.getenv("UPDATES_CHANNEL_ID", "").strip() or _updates_raw
+if _updates_id.lower().startswith(("https://t.me/", "http://t.me/")):
+    # Keep the whole post-host path as one string: a multi-segment path like
+    # /joinchat/AAAA then fails the username check below instead of passing its
+    # last segment off as a valid @username. Also cut any ?query/#fragment so a
+    # tracking-tagged URL still resolves to its channel.
+    _updates_id = _updates_id.split("/", 3)[-1].split("?", 1)[0].split("#", 1)[0].rstrip("/")
+_updates_id = _updates_id.lstrip("@")
+if _updates_id.isascii() and re.fullmatch(r"-?\d+", _updates_id):
+    # int, not str: kurigram strips the "-" from a digits-only string and routes
+    # it to a phone-number lookup (ResolvePhone), which fails. A -100… id must
+    # be an int to resolve as a channel peer.
+    UPDATES_CHANNEL_ID = int(_updates_id)
+elif (4 <= len(_updates_id) <= 32 and _updates_id.isascii()
+        and _updates_id.replace("_", "").isalnum()):
+    UPDATES_CHANNEL_ID = f"@{_updates_id}"
+else:
+    # A private invite link (t.me/+hash, /joinchat/…) has no @username form.
+    # Leave this empty so the broadcast disables itself instead of failing
+    # every night against an unroutable peer; set UPDATES_CHANNEL_ID to the
+    # numeric -100… id to post into a private channel.
+    UPDATES_CHANNEL_ID = ""
 
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
@@ -86,6 +115,25 @@ OFFER_GRANT_CHANCE = float(os.getenv("OFFER_GRANT_CHANCE", "1.0"))
 OFFER_RECENT_PURCHASE_DAYS = int(os.getenv("OFFER_RECENT_PURCHASE_DAYS", "14"))
 OFFER_DISCOUNT_SKEW = float(os.getenv("OFFER_DISCOUNT_SKEW", "31.387447433766166"))
 OFFER_GRANT_INTERVAL_SECONDS = int(os.getenv("OFFER_GRANT_INTERVAL_SECONDS", "300"))
+
+# ── Nightly coupon codes ──
+# COUPON_COUNT codes are posted to UPDATES_CHANNEL_ID at 00:00 UTC. Any user
+# may redeem any code once; a redemption grants a discount offer worth a
+# random COUPON_MIN_CREDITS..COUPON_MAX_CREDITS credits off for
+# COUPON_OFFER_HOURS. Codes stop working COUPON_TTL_HOURS after posting.
+# The alphabet excludes O/0/I/1 so a mistyped code cannot hit another coupon.
+COUPON_COUNT = int(os.getenv("COUPON_COUNT", "10"))
+# Floored at 6: codes are brute-forceable through the chat handler over their
+# 24h life, and a shorter code silently removes that protection.
+COUPON_CODE_LENGTH = max(6, int(os.getenv("COUPON_CODE_LENGTH", "6")))
+COUPON_TTL_HOURS = float(os.getenv("COUPON_TTL_HOURS", "24"))
+COUPON_OFFER_HOURS = float(os.getenv("COUPON_OFFER_HOURS", "6"))
+COUPON_MIN_CREDITS = int(os.getenv("COUPON_MIN_CREDITS", "1"))
+# Clamped to min: an inverted config (min > max) would otherwise burn a
+# redemption — the claim runs before the roll, and random.randint(min, max)
+# raises ValueError on an empty range, leaving the code spent with no offer.
+COUPON_MAX_CREDITS = max(int(os.getenv("COUPON_MAX_CREDITS", "10")), COUPON_MIN_CREDITS)
+COUPON_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 CREDIT_PLANS = {
     "10": {"credits": 10, "amount_inr": 1000, "label": "10 Credits — ₹10"},

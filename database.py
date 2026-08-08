@@ -259,21 +259,39 @@ async def get_active_offer(telegram_id: int) -> dict | None:
     return offer
 
 
-async def consume_offer(telegram_id: int):
-    """Mark the user's active discount offer as used after a purchase."""
-    await db.users.update_one(
-        {"telegram_id": telegram_id},
-        {"$set": {"offer.used": True}},
-    )
+async def consume_offer(telegram_id: int, granted_at=None):
+    """Mark the offer a purchase was priced against as used.
+
+    granted_at identifies which offer instance to spend. A user holds one offer
+    slot, so a coupon redeemed while a purchase is still in flight replaces the
+    offer that purchase priced against; without this filter the purchase would
+    spend the newly redeemed coupon instead. None falls back to spending
+    whatever occupies the slot — the opposite default to restore_offer, so that
+    an unidentified call always errs against the user rather than the platform.
+    """
+    query = {"telegram_id": telegram_id}
+    if granted_at is not None:
+        query["offer.granted_at"] = granted_at
+    await db.users.update_one(query, {"$set": {"offer.used": True}})
     _invalidate_user_cache(telegram_id)
 
 
-async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
+async def restore_offer(telegram_id: int, granted_at=None, grace_minutes: int = 15, delay_hours: float = 0) -> bool:
     """Restore a used discount offer if a purchase attempt failed or timed out without OTP.
 
     If the offer expired (or has less than delay_hours + grace_minutes left), extend
     expires_at to cover delay_hours + grace_minutes so the user does not lose their
     discount while waiting for a pending refund or session timeout.
+
+    granted_at identifies the offer this purchase spent, and None means it spent
+    none (a price=0 OTP re-request or seller self-login) so there is nothing to
+    restore. Restoring on a mismatch — or on None — would un-spend whatever
+    offer happens to occupy the slot now, such as a coupon redeemed after this
+    purchase started, handing out its discount a second time.
+
+    consume_offer errs the opposite way for the same reason: an unidentified
+    consume marks the current offer used. Each default costs the user at most a
+    discount they did not pay for the right to keep, never the platform.
     Returns True if an offer was restored, False otherwise.
     """
     user = await get_user(telegram_id)
@@ -281,6 +299,8 @@ async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: 
         return False
 
     offer = user["offer"]
+    if offer.get("granted_at") != granted_at:
+        return False
     was_used = offer.get("used", False)
     now = datetime.now(timezone.utc)
     expires_at = offer.get("expires_at")
@@ -294,11 +314,13 @@ async def restore_offer(telegram_id: int, grace_minutes: int = 15, delay_hours: 
         if expires_at <= now or (expires_at - now).total_seconds() < needed_seconds:
             update_doc["$set"] = {"offer.expires_at": now + timedelta(seconds=needed_seconds)}
 
-    await db.users.update_one(
-        {"telegram_id": telegram_id},
-        update_doc,
-    )
+    # Keyed on the write too, not just the read above: a coupon redeemed in
+    # between would otherwise be the offer this unset revives.
+    res = await db.users.update_one(
+        {"telegram_id": telegram_id, "offer.granted_at": granted_at}, update_doc)
     _invalidate_user_cache(telegram_id)
+    if res.matched_count == 0:
+        return False
     return was_used
 
 
@@ -344,16 +366,6 @@ async def set_offer(telegram_id: int, credits: int, duration_hours: float):
     )
     _invalidate_user_cache(telegram_id)
     return offer
-
-
-async def get_last_daily_discount_time() -> datetime | None:
-    doc = await db.system.find_one({"_id": "daily_discount"})
-    return doc.get("last_run") if doc else None
-
-
-async def set_last_daily_discount_time(dt: datetime):
-    await db.system.update_one({"_id": "daily_discount"}, {"$set": {"last_run": dt}}, upsert=True)
-
 
 
 # ── Sessions ──
@@ -652,7 +664,7 @@ async def get_user_otps(telegram_id: int, limit: int = 100):
 
 # ── Active Assignments ──
 
-async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int, order_id: str | None = None):
+async def save_active_assignment(phone_number: str, user_id: int, price: int, timeout: int, order_id: str | None = None, offer_granted_at=None):
     doc = {
         "phone_number": phone_number,
         "user_id": user_id,
@@ -661,6 +673,7 @@ async def save_active_assignment(phone_number: str, user_id: int, price: int, ti
         "assigned_at": datetime.now(timezone.utc),
         "expires_at": datetime.now(timezone.utc) + timedelta(seconds=timeout),
         "order_id": order_id,
+        "offer_granted_at": offer_granted_at,
     }
     await db.active_assignments.update_one(
         {"phone_number": phone_number},
@@ -748,11 +761,12 @@ async def mark_pending_payment_expired(qr_id: str):
 REFUND_DELAY_HOURS = 1
 
 
-async def save_pending_refund(user_id: int, phone_number: str, amount: int):
+async def save_pending_refund(user_id: int, phone_number: str, amount: int, offer_granted_at=None):
     await db.pending_refunds.insert_one({
         "user_id": user_id,
         "phone_number": phone_number,
         "amount": amount,
+        "offer_granted_at": offer_granted_at,
         "status": "pending",
         "created_at": datetime.now(timezone.utc),
         "refund_at": datetime.now(timezone.utc) + timedelta(hours=REFUND_DELAY_HOURS),
@@ -975,6 +989,9 @@ async def ensure_indexes():
     # Crypto deposits: one credit per tx hash. Unique index makes claim_tx's
     # insert the atomic gate against double-credit races.
     await db.used_tx.create_index("tx_hash", unique=True, name="uniq_used_tx")
+    # Coupons: code is the redeem lookup key and the generation collision gate.
+    await db.coupons.create_index("code", unique=True, name="uniq_coupon_code")
+    await db.coupons.create_index("expires_at")
     await db.withdrawal_requests.create_index("created_at")
     await db.payments.create_index("created_at")
 
@@ -1117,6 +1134,23 @@ async def save_payment(user_id: int, method: str, plan: str, amount: float, curr
 
 async def get_user_payments(user_id: int, limit: int = 5):
     return await db.payments.find({"user_id": user_id}).sort("created_at", -1).to_list(limit)
+
+
+async def get_user_transactions(user_id: int, limit: int = 5) -> list[dict]:
+    """Return combined list of payments (deposits) and withdrawal requests, sorted by date desc."""
+    payments = await db.payments.find({"user_id": user_id}).sort("created_at", -1).to_list(limit)
+    withdrawals = await db.withdrawal_requests.find({"seller_id": user_id}).sort("created_at", -1).to_list(limit)
+    
+    combined = []
+    for p in payments:
+        p["transaction_type"] = "deposit"
+        combined.append(p)
+    for w in withdrawals:
+        w["transaction_type"] = "withdrawal"
+        combined.append(w)
+        
+    combined.sort(key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return combined[:limit]
 
 
 async def get_payment_stats():
@@ -1485,7 +1519,9 @@ async def get_user_seller_details(seller_id: int) -> dict:
     listings = await db.sell_listings.find({"seller_id": seller_id}).sort("created_at", -1).to_list(None)
     s_live = await db.sessions.find({"added_by": seller_id}).to_list(None)
     s_rem = await db.removed_sessions.find({"added_by": seller_id}).to_list(None)
+    blacklist = await db.seller_phone_blacklist.find({"seller_id": seller_id}).to_list(None)
 
+    blacklist_map = {b["phone_number"]: b for b in blacklist if b.get("phone_number")}
     listed_map = {}
     sold_map = {}
 
@@ -1494,10 +1530,15 @@ async def get_user_seller_details(seller_id: int) -> dict:
         st = l.get("status")
         if not ph:
             continue
-        if st in ("active", "pending_price"):
+        if st in ("active", "pending_price", "removed"):
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = st
             listed_map[ph] = {
                 "phone_number": ph,
-                "status": st,
+                "status": display_status,
                 "created_at": l.get("created_at"),
                 "country_code": l.get("country_code", "XX"),
             }
@@ -1509,15 +1550,20 @@ async def get_user_seller_details(seller_id: int) -> dict:
                 "country_code": l.get("country_code", "XX"),
             }
 
-    for s in (s_live + s_rem):
+    for s in s_live:
         ph = s.get("phone_number")
         st = s.get("status")
         if not ph:
             continue
         if st in ("active", "pending_price") and ph not in listed_map and ph not in sold_map:
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = st
             listed_map[ph] = {
                 "phone_number": ph,
-                "status": st,
+                "status": display_status,
                 "created_at": s.get("created_at"),
                 "country_code": s.get("country_code", "XX"),
             }
@@ -1526,6 +1572,31 @@ async def get_user_seller_details(seller_id: int) -> dict:
                 "phone_number": ph,
                 "payout": s.get("sold_price", 0),
                 "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+
+    for s in s_rem:
+        ph = s.get("phone_number")
+        st = s.get("status")
+        if not ph:
+            continue
+        if st == "sold" and ph not in sold_map:
+            sold_map[ph] = {
+                "phone_number": ph,
+                "payout": s.get("sold_price", 0),
+                "sold_at": s.get("sold_at"),
+                "country_code": s.get("country_code", "XX"),
+            }
+        elif st in ("active", "pending_price") and ph not in listed_map and ph not in sold_map:
+            if ph in blacklist_map:
+                reason = blacklist_map[ph].get("reason", "blacklisted")
+                display_status = f"blacklisted: {reason}"
+            else:
+                display_status = "removed"
+            listed_map[ph] = {
+                "phone_number": ph,
+                "status": display_status,
+                "created_at": s.get("created_at"),
                 "country_code": s.get("country_code", "XX"),
             }
 
@@ -1875,4 +1946,152 @@ async def set_wa_price(phone_number: str, price: int) -> bool:
         {"phone_number": phone_number}, {"$set": {"price": price}},
     )
     return res.modified_count > 0
+
+
+# ── Coupons ──
+#
+# Nightly codes posted to the updates channel. Any user may redeem any code
+# once; the reward is rolled at redeem time so the codes themselves carry no
+# value and are worthless to leak.
+
+
+def generate_coupon_code() -> str:
+    """A random coupon code from the unambiguous alphabet.
+
+    secrets, not random: the codes are posted publicly, and Mersenne Twister
+    state is recoverable from observed output — which would let an observer
+    derive codes that have not been posted yet.
+    """
+    import secrets
+    from config import COUPON_ALPHABET, COUPON_CODE_LENGTH
+
+    return "".join(secrets.choice(COUPON_ALPHABET) for _ in range(COUPON_CODE_LENGTH))
+
+
+async def create_coupon_batch(count: int | None = None, ttl_hours: float | None = None) -> list[str]:
+    """Generate and insert a fresh batch of coupon codes. Returns the codes."""
+    from config import COUPON_COUNT, COUPON_TTL_HOURS
+
+    n = COUPON_COUNT if count is None else count
+    ttl = COUPON_TTL_HOURS if ttl_hours is None else ttl_hours
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=ttl)
+
+    codes: list[str] = []
+    for _ in range(n):
+        # The unique index turns a generation collision into a DuplicateKeyError
+        # we retry, rather than a silent overwrite of a live code.
+        for _attempt in range(10):
+            code = generate_coupon_code()
+            try:
+                await db.coupons.insert_one({
+                    "code": code,
+                    "batch_at": now,
+                    "expires_at": expires_at,
+                    "redeemed_by": [],
+                })
+            except DuplicateKeyError:
+                continue
+            codes.append(code)
+            break
+    return codes
+
+
+async def redeem_coupon(telegram_id: int, code: str) -> tuple[str, int]:
+    """Redeem a coupon and grant a discount offer.
+
+    Returns (status, credits): status is "ok" | "no_user" | "unknown" | "expired" | "already";
+    credits is the effective discount on success, else 0.
+
+    The claim is one update_one so the once-per-user check and the claim cannot
+    interleave — a double-tap can never grant two offers.
+    """
+    import random
+    from config import COUPON_MIN_CREDITS, COUPON_MAX_CREDITS, COUPON_OFFER_HOURS
+
+    code = code.strip().upper()
+    now = datetime.now(timezone.utc)
+
+    # Before the claim, not after: the offer update below is not an upsert, so a
+    # user with no document would have the code marked redeemed and get nothing.
+    # This is one extra find_one, on a path only a well-formed code reaches.
+    if not await get_user(telegram_id):
+        return "no_user", 0
+
+    claim = await db.coupons.update_one(
+        {"code": code, "expires_at": {"$gt": now}, "redeemed_by": {"$ne": telegram_id}},
+        {"$addToSet": {"redeemed_by": telegram_id}},
+    )
+    if claim.matched_count == 0:
+        # Nothing was claimed — read once more only to word the reply.
+        doc = await db.coupons.find_one({"code": code})
+        if not doc:
+            return "unknown", 0
+        if telegram_id in doc.get("redeemed_by", []):
+            return "already", 0
+        return "expired", 0
+
+    rolled = random.randint(COUPON_MIN_CREDITS, COUPON_MAX_CREDITS)
+    expires_at = now + timedelta(hours=COUPON_OFFER_HOURS)
+
+    # Single aggregation-pipeline update so the best-of comparison happens
+    # server-side. A read-then-write here would let two codes redeemed at the
+    # same instant clobber each other's discount. The "cur" condition mirrors
+    # get_active_offer: a used or expired offer counts as 0, so it cannot block
+    # a fresh roll.
+    grant = await db.users.update_one(
+        {"telegram_id": telegram_id},
+        [
+            {"$set": {"offer": {
+                "credits": {"$let": {
+                    "vars": {"cur": {"$cond": [
+                        {"$and": [
+                            {"$ne": [{"$ifNull": ["$offer.used", False]}, True]},
+                            {"$gt": [{"$ifNull": ["$offer.expires_at", now]}, now]},
+                        ]},
+                        {"$ifNull": ["$offer.credits", 0]},
+                        0,
+                    ]}},
+                    "in": {"$max": [rolled, "$$cur"]},
+                }},
+                "granted_at": now,
+                "expires_at": expires_at,
+            }}},
+            # Pipeline $set MERGES into the existing offer subdocument rather
+            # than replacing it, so a `used: true` left by consume_offer would
+            # survive and make get_active_offer treat this fresh offer as
+            # spent — the user would be told they got a discount they cannot
+            # use. Verified against the live server.
+            {"$unset": "offer.used"},
+        ],
+    )
+    _invalidate_user_cache(telegram_id)
+
+    if grant.matched_count == 0:
+        # The user's document vanished between the guard above and this write.
+        # The claim already succeeded, so hand the code back rather than report
+        # a discount that was never stored.
+        await db.coupons.update_one(
+            {"code": code}, {"$pull": {"redeemed_by": telegram_id}})
+        return "no_user", 0
+
+    # Read back the value the server actually stored, so the reply cannot
+    # disagree with the database after a concurrent redemption. No `rolled`
+    # fallback: that would defeat the read-back it is standing in for.
+    user = await get_user(telegram_id)
+    credits = int(((user or {}).get("offer") or {}).get("credits", 0))
+    return "ok", credits
+
+
+async def get_last_coupon_batch_date() -> str:
+    doc = await db.system.find_one({"_id": "coupon_batch"})
+    return (doc or {}).get("day", "")
+
+
+async def set_last_coupon_batch_date(day: str) -> None:
+    await db.system.update_one(
+        {"_id": "coupon_batch"},
+        {"$set": {"day": day, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
 
