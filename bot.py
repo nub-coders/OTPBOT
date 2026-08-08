@@ -41,6 +41,24 @@ em.patch_pyrogram_for_custom_emojis()
 
 log = logging.getLogger(__name__)
 
+BOT_START_TIME = time.time()
+
+def get_uptime() -> str:
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    days, remainder = divmod(uptime_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
 bot: Client = None
 auth_states: dict[int, dict] = {}
 pay_states: dict[int, dict] = {}
@@ -248,6 +266,34 @@ async def post_coupon_batch(bot, codes: list[str]) -> bool:
     except Exception as e:
         log.error("Coupon batch post failed: %s", e)
         return False
+
+async def post_account_to_support_channel(bot: Client, phone: str, cc: str, year: int | None, month: int | None, email_added: bool, price: int):
+    """Post new account details (admin or seller listed) to the support/updates channel with masked phone and listing price."""
+    if not UPDATES_CHANNEL_ID:
+        return
+    flag = get_country_flag(cc)
+    cname = get_country_name(cc)
+    year_label = format_account_year(year, month)
+    masked_phone = mask_phone(phone)
+    can_update_email = "Yes" if email_added else "No"
+    
+    text = (
+        f"📱 **New Account Listed!**\n\n"
+        f"{em.PHONE} **Number:** `{masked_phone}`\n"
+        f"{flag} **Country:** {cname} ({cc})\n"
+        f"{em.PRICE_TAG} **Listing Price:** **{price} credits**\n"
+        f"{em.CALENDAR} **Account Age:** **{year_label}**\n"
+        f"{em.MAIL} **Can Update Email:** **{can_update_email}**"
+    )
+    
+    try:
+        bot_info = await bot.get_me()
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{em.PLAY} Open Bot", url=f"https://t.me/{bot_info.username}")]
+        ])
+        await bot.send_message(UPDATES_CHANNEL_ID, text, reply_markup=reply_markup)
+    except Exception as e:
+        log.error("Failed to send account info to support channel: %s", e)
 
 
 async def _wa_notify(bot: Client, text: str, reply_markup=None):
@@ -880,6 +926,7 @@ def _register_handlers(app: Client):
             f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
+        await post_account_to_support_channel(app, phone, cc, year, month, email_added, price)
 
         await safe_edit(cq.message,
             f"{em.SUCCESS} **Number added successfully!**\n\n"
@@ -954,6 +1001,7 @@ def _register_handlers(app: Client):
             f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
             f"{em.MONEY} Price: {price} credits"
         )
+        await post_account_to_support_channel(app, phone, cc, year, month, email_added, price)
 
         await safe_edit(cq.message,
             f"{em.SUCCESS} **Number added successfully!**\n\n"
@@ -963,7 +1011,7 @@ def _register_handlers(app: Client):
         )
 
     @app.on_message(filters.text & filters.private & ~filters.command([
-        "start", "help", "cancel", "broadcast", "info", "feedback", "wotp",
+        "start", "help", "cancel", "broadcast", "info", "feedback", "wotp", "ping", "oing",
     ]))
     async def on_text(_, message: Message):
         db.begin_user_cache()
@@ -4530,6 +4578,16 @@ def _register_handlers(app: Client):
                 reply_markup=back_kb("main_menu"),
             )
 
+    @app.on_message(filters.command(["ping", "oing"]) & filters.private)
+    @verified
+    async def cmd_ping(_, message: Message):
+        cmd = message.command[0].lower()
+        reply_word = "Oong!" if cmd == "oing" else "Pong!"
+        uptime = get_uptime()
+        await message.reply(
+            f"{em.SUCCESS} **{reply_word}**\n\n"
+            f"⏱️ **Uptime:** `{uptime}`"
+        )
 
     @app.on_message(filters.command("cancel") & filters.private)
     @verified
@@ -4931,6 +4989,13 @@ async def _notify_activated_sellers(bot: Client, activated: list, cc: str, price
                 )
             except Exception as e:
                 log.error("Failed to notify seller %s of activated listing: %s", sid, e)
+
+        # Post to support channel
+        await post_account_to_support_channel(
+            bot, pnum, act.get("country_code", cc),
+            act.get("account_year"), act.get("account_month"),
+            act.get("email_added", False), price
+        )
 
 
 async def _handle_update_category_price(message: Message, text: str):
@@ -5944,6 +6009,8 @@ async def _handle_set_new_category_price(message: Message, text: str):
         f"{em.MAIL} Email Added: **{'Yes' if email_added else 'No'}**\n"
         f"{em.MONEY} Price: {price} credits"
     )
+    await post_account_to_support_channel(bot, phone, cc, year, month, email_added, price)
+    await _notify_activated_sellers(bot, activated, cc, price)
 
     act_str = f"\n⚡ **{len(activated)} pending seller account(s) activated!**" if activated else ""
 
@@ -6201,6 +6268,7 @@ async def _complete_sell_submission(seller_id: int, status_msg, phone: str, sess
             f"{em.MONEY} Category Price: {cat_price} credits\n"
             f"{em.DOLLAR} Payout on sale: {seller_payout} credits"
         )
+        await post_account_to_support_channel(bot, phone, cc, acc_year, acc_month, has_email, cat_price)
 
         await safe_edit(status_msg,
             f"{em.SUCCESS} **Account Listed for Sale!**\n\n"
