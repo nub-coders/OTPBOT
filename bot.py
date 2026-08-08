@@ -277,19 +277,27 @@ async def post_account_to_support_channel(bot: Client, phone: str, cc: str, year
     masked_phone = mask_phone(phone)
     can_update_email = "Yes" if email_added else "No"
     
+    try:
+        bot_info = await bot.get_me()
+        bot_username = f"@{bot_info.username}"
+        bot_url = f"https://t.me/{bot_info.username}"
+    except Exception:
+        bot_username = "@Vault_store_otp_bot"
+        bot_url = "https://t.me/Vault_store_otp_bot"
+
     text = (
         f"📱 **New Account Listed!**\n\n"
         f"{em.PHONE} **Number:** `{masked_phone}`\n"
         f"{flag} **Country:** {cname} ({cc})\n"
         f"{em.PRICE_TAG} **Listing Price:** **{price} credits**\n"
         f"{em.CALENDAR} **Account Age:** **{year_label}**\n"
-        f"{em.MAIL} **Can Update Email:** **{can_update_email}**"
+        f"{em.MAIL} **Can Update Email:** **{can_update_email}**\n\n"
+        f"🤖 **Buy via:** {bot_username}"
     )
     
     try:
-        bot_info = await bot.get_me()
         reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{em.PLAY} Open Bot", url=f"https://t.me/{bot_info.username}")]
+            [InlineKeyboardButton(f"{em.PLAY} Open Bot", url=bot_url)]
         ])
         await bot.send_message(UPDATES_CHANNEL_ID, text, reply_markup=reply_markup)
     except Exception as e:
