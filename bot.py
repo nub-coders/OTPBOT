@@ -2315,9 +2315,15 @@ def _register_handlers(app: Client):
             f"  Last 24h: ₹{rev['24h']['inr']:.2f} ({rev['24h']['count']} txns)\n"
             f"  This Month: ₹{rev['monthly']['inr']:.2f} ({rev['monthly']['count']} txns)\n"
             f"  All-time: ₹{rev['all']['inr']:.2f} ({rev['all']['count']} txns)\n\n"
-            f"{em.DOLLAR} **Withdrawals:**\n"
-            f"  This Month: **{wstats['monthly']['amount']}** credits ({wstats['monthly']['count']} reqs)\n"
-            f"  Total: **{wstats['all']['amount']}** credits ({wstats['all']['count']} reqs)\n\n"
+            f"{em.DOLLAR} **Seller Withdrawals:**\n"
+            f"  This Month: **{int(wstats['seller']['monthly']['amount'])}** credits ({wstats['seller']['monthly']['count']} reqs)\n"
+            f"  Total: **{int(wstats['seller']['all']['amount'])}** credits ({wstats['seller']['all']['count']} reqs)\n\n"
+            f"{em.DOLLAR} **Admin Withdrawals:**\n"
+            f"  This Month: **₹{wstats['admin']['monthly']['amount']:.2f}** ({wstats['admin']['monthly']['count']} reqs)\n"
+            f"  Total: **₹{wstats['admin']['all']['amount']:.2f}** ({wstats['admin']['all']['count']} reqs)\n\n"
+            f"{em.DOLLAR} **Combined Withdrawals (INR-equiv):**\n"
+            f"  This Month: **₹{wstats['combined']['monthly']['amount']:.2f}** ({wstats['combined']['monthly']['count']} reqs)\n"
+            f"  Total: **₹{wstats['combined']['all']['amount']:.2f}** ({wstats['combined']['all']['count']} reqs)\n\n"
             f"{em.CREDIT} **Payments by method ({ps['total_payments']}):**{pay_lines}"
             f"</blockquote>"
         )
@@ -3767,6 +3773,8 @@ def _register_handlers(app: Client):
             f"• Total Earned: **{stats['earned_total']} credits** | Withdrawable Balance: **{stats.get('balance', 0)} credits**"
         )
 
+        pending_w = await db.withdrawal_requests.find({"seller_id": cq.from_user.id, "status": "pending"}).to_list(None)
+
         buttons = [
             [InlineKeyboardButton(f"{em.ADD} Submit Account", callback_data="submit_account", style=S.SUCCESS)],
             [
@@ -3777,8 +3785,10 @@ def _register_handlers(app: Client):
                 InlineKeyboardButton(f"{em.PHONE} Login to My Accounts ({active_cnt})", callback_data="my_accounts", style=S.DEFAULT),
                 InlineKeyboardButton(f"{em.STATS} Sold Stats ({sold_cnt})", callback_data="seller_sold", style=S.DEFAULT),
             ],
-            [InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)],
         ]
+        if pending_w:
+            buttons.append([InlineKeyboardButton(f"⏳ Pending Withdrawals ({len(pending_w)})", callback_data="my_withdrawals", style=S.WARNING)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="main_menu", style=S.DEFAULT)])
 
         await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -4281,18 +4291,22 @@ def _register_handlers(app: Client):
             f"• Pending Admin Requests: **-₹{pend:,.2f}**\n\n"
             f"💰 **Available Pool: ₹{avail:,.2f}**\n\n"
         )
+        pending_admin_w = await db.withdrawal_requests.find({"seller_id": cq.from_user.id, "status": "pending"}).to_list(None)
+
         if avail <= 0:
             msg += f"{em.ERROR} No funds currently available to withdraw."
-            buttons = [[InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)]]
+            buttons = []
         else:
             msg += "Select payout method:"
             buttons = [
                 [
                     InlineKeyboardButton(f"💳 UPI", callback_data="admin_wmth:upi", style=S.SUCCESS),
                     InlineKeyboardButton(f"🪙 Crypto USDT", callback_data="admin_wmth:usdt", style=S.SUCCESS),
-                ],
-                [InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)],
+                ]
             ]
+        if pending_admin_w:
+            buttons.append([InlineKeyboardButton(f"⏳ My Pending Withdrawals ({len(pending_admin_w)})", callback_data="my_withdrawals", style=S.WARNING)])
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data="admin_panel", style=S.DEFAULT)])
         await safe_edit(cq.message, msg, reply_markup=InlineKeyboardMarkup(buttons))
 
     @app.on_callback_query(filters.regex(r"^admin_wmth:(upi|usdt)$"))
@@ -4321,6 +4335,63 @@ def _register_handlers(app: Client):
             f"Send the amount you wish to withdraw:",
             reply_markup=back_kb("admin_panel"),
         )
+
+    @app.on_callback_query(filters.regex("^my_withdrawals$"))
+    @verified
+    async def cb_my_withdrawals(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        pending = await db.withdrawal_requests.find({"seller_id": user_id, "status": "pending"}).to_list(None)
+        if not pending:
+            await cq.answer("You have no pending withdrawals.", show_alert=True)
+            if await db.is_admin(user_id):
+                await cb_admin_withdrawal_req(app, cq)
+            else:
+                await cb_sell_account(app, cq)
+            return
+
+        lines = []
+        buttons = []
+        for w in pending:
+            wid = str(w["_id"])
+            amt = w["amount"]
+            mth = w["method"]
+            dtl = w["details"]
+            rtype = w.get("request_type", "seller")
+            unit = "₹" if rtype == "admin" else "credits"
+            
+            lines.append(f"• **{amt} {unit}** via {mth.upper()} (`{dtl}`)")
+            buttons.append([InlineKeyboardButton(f"❌ Cancel {amt} {unit}", callback_data=f"cancel_w_own:{wid}", style=S.DANGER)])
+
+        back_target = "admin_withdrawal_req" if await db.is_admin(user_id) else "sell_account"
+        buttons.append([InlineKeyboardButton(f"{em.BACK} Back", callback_data=back_target, style=S.DEFAULT)])
+
+        await safe_edit(
+            cq.message,
+            f"⏳ **Your Pending Withdrawals ({len(pending)})**\n\n"
+            f"You can cancel your pending requests below:\n\n" + "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    @app.on_callback_query(filters.regex(r"^cancel_w_own:"))
+    @verified
+    async def cb_cancel_w_own(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        wid = cq.data.split(":", 1)[1]
+        
+        from bson import ObjectId
+        w = await db.withdrawal_requests.find_one({"_id": ObjectId(wid), "seller_id": user_id, "status": "pending"})
+        if not w:
+            await cq.answer("Withdrawal request not found or already processed.", show_alert=True)
+            await cb_my_withdrawals(app, cq)
+            return
+
+        doc = await db.mark_withdrawal_rejected(wid, reason="Cancelled by user")
+        if doc:
+            await cq.answer("Withdrawal request cancelled successfully!", show_alert=True)
+        else:
+            await cq.answer("Failed to cancel withdrawal.", show_alert=True)
+
+        await cb_my_withdrawals(app, cq)
 
     # ── Help / Cancel ──
 

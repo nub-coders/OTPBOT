@@ -1089,7 +1089,7 @@ async def get_revenue_stats():
 
 
 async def get_withdrawal_stats():
-    """Withdrawal totals (credits and count) split by all-time and current month (resets on 1st of month)."""
+    """Withdrawal totals (credits and count) split by all-time and current month, separated for sellers and admins."""
     now = datetime.now(timezone.utc)
     start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -1098,16 +1098,16 @@ async def get_withdrawal_stats():
             {"$match": match},
             {"$group": {"_id": "$status", "count": {"$sum": 1}, "total": {"$sum": "$amount"}}},
         ]
-        done_count, done_amount = 0, 0
-        pending_count, pending_amount = 0, 0
+        done_count, done_amount = 0, 0.0
+        pending_count, pending_amount = 0, 0.0
         async for doc in db.withdrawal_requests.aggregate(pipeline):
             st = doc["_id"]
             if st == "done":
                 done_count += doc["count"]
-                done_amount += int(doc["total"])
+                done_amount += float(doc["total"])
             elif st == "pending":
                 pending_count += doc["count"]
-                pending_amount += int(doc["total"])
+                pending_amount += float(doc["total"])
         total_count = done_count + pending_count
         total_amount = done_amount + pending_amount
         return {
@@ -1119,9 +1119,30 @@ async def get_withdrawal_stats():
             "amount": total_amount,
         }
 
+    seller_all = await withdrawals({"status": {"$ne": "rejected"}, "request_type": {"$ne": "admin"}})
+    seller_monthly = await withdrawals({"status": {"$ne": "rejected"}, "request_type": {"$ne": "admin"}, "created_at": {"$gte": start_of_month}})
+    admin_all = await withdrawals({"status": {"$ne": "rejected"}, "request_type": "admin"})
+    admin_monthly = await withdrawals({"status": {"$ne": "rejected"}, "request_type": "admin", "created_at": {"$gte": start_of_month}})
+
     return {
-        "all": await withdrawals({"status": {"$ne": "rejected"}}),
-        "monthly": await withdrawals({"status": {"$ne": "rejected"}, "created_at": {"$gte": start_of_month}}),
+        "seller": {
+            "all": seller_all,
+            "monthly": seller_monthly,
+        },
+        "admin": {
+            "all": admin_all,
+            "monthly": admin_monthly,
+        },
+        "combined": {
+            "all": {
+                "amount": seller_all["amount"] + admin_all["amount"],
+                "count": seller_all["count"] + admin_all["count"],
+            },
+            "monthly": {
+                "amount": seller_monthly["amount"] + admin_monthly["amount"],
+                "count": seller_monthly["count"] + admin_monthly["count"],
+            }
+        }
     }
 
 
