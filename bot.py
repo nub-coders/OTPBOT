@@ -5236,6 +5236,14 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
     # Apply any active discount offer server-side (never trust the client).
     offer = await db.get_active_offer(user_id)
     price = apply_discount(base_price, offer)
+    # Spend it here, where the price is computed, not after the ~27 awaits of
+    # session work below. Marking it used only at the end leaves it live for a
+    # coupon redeemed mid-flight to read as `cur` and roll forward into the
+    # replacement, so the discount is banked and kept. Every abort between here
+    # and assignment restores it.
+    offer_granted_at = offer.get("granted_at") if offer else None
+    if offer:
+        await db.consume_offer(user_id, offer_granted_at)
     credits = await db.get_credits(user_id)
     # A fully-covered number is free only for users who hold real credits.
     if price == 0 and credits <= 0:
@@ -5245,6 +5253,8 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
     if credits < price:
         # An offer may have expired between top-up and payment, raising the price.
         await db.unreserve_session(phone)
+        if offer:
+            await db.restore_offer(user_id, offer_granted_at)
         await _send_or_edit(user_id, edit_msg,
             f"{em.ERROR} You need {price} credits but have {credits}. "
             f"Your top-up was added to your balance — buy more credits or pick another number.",
@@ -5281,6 +5291,8 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
             f"{em.ERROR} Failed to connect `{mask_phone(phone)}`.\n\n"
             "This has been reported to the admins.",
             reply_markup=back_kb("main_menu"))
+        if offer:
+            await db.restore_offer(user_id, offer_granted_at)
         return False
 
     pwd = session.get("password", "")
@@ -5314,6 +5326,8 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
                 f"{em.ERROR} Password verification failed for `{mask_phone(phone)}`.\n\n"
                 "This has been reported to the admins.",
                 reply_markup=back_kb("main_menu"))
+            if offer:
+                await db.restore_offer(user_id, offer_granted_at)
             return False
 
     is_frozen = clients.is_account_frozen(phone)
@@ -5332,6 +5346,10 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
             f"Are you sure to continue?",
             reply_markup=confirm_kb
         )
+        # Must restore: tapping "Yes, Continue" re-enters this function, which
+        # re-reads the offer. Left used, the retry would be priced without it.
+        if offer:
+            await db.restore_offer(user_id, offer_granted_at)
         return False
 
     credits_deducted, balance_deducted = 0, 0
@@ -5340,18 +5358,13 @@ async def _finalize_purchase(user_id: int, phone: str, edit_msg=None, confirmed_
         if not ok:
             await clients.stop_session(phone)
             await db.unreserve_session(phone)
+            if offer:
+                await db.restore_offer(user_id, offer_granted_at)
             await _send_or_edit(user_id, edit_msg,
                 f"{em.ERROR} Could not deduct funds. Please try again or contact support.",
                 reply_markup=back_kb("main_menu"))
             return False
         log.info("Deducted %d credits and %d balance from user %d on selection", credits_deducted, balance_deducted, user_id)
-
-    # Spend the offer this purchase was actually priced against (read far above,
-    # before ~27 awaits of session work). A coupon redeemed in that window
-    # replaces the slot, and an unkeyed consume would burn the coupon instead.
-    offer_granted_at = offer.get("granted_at") if offer else None
-    if offer:
-        await db.consume_offer(user_id, offer_granted_at)
 
     order_id = db.new_order_id()
     clients.assign_number(phone, user_id, OTP_TIMEOUT, price, credits_deducted=credits_deducted, balance_deducted=balance_deducted, order_id=order_id, offer_granted_at=offer_granted_at)

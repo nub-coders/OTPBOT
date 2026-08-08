@@ -294,13 +294,22 @@ async def restore_offer(telegram_id: int, granted_at=None, grace_minutes: int = 
     discount they did not pay for the right to keep, never the platform.
     Returns True if an offer was restored, False otherwise.
     """
+    # Before the read, and not just for speed: {"offer.granted_at": None} also
+    # matches an offer subdocument with no granted_at at all, so falling through
+    # would revive exactly the offers this guard exists to protect.
+    if granted_at is None:
+        return False
+
     user = await get_user(telegram_id)
     if not user or not user.get("offer"):
         return False
 
     offer = user["offer"]
-    if offer.get("granted_at") != granted_at:
-        return False
+    # No Python == on granted_at: BSON stores milliseconds, so a value that has
+    # not round-tripped through Mongo (set_offer returns microseconds) would
+    # compare unequal and silently refuse a restore the user is owed. The keyed
+    # update_one below is the real gate — the server truncates the query value
+    # exactly as it truncated the stored one, so it matches either way.
     was_used = offer.get("used", False)
     now = datetime.now(timezone.utc)
     expires_at = offer.get("expires_at")

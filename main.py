@@ -116,8 +116,6 @@ async def refund_processor(bot):
                 if not claimed:
                     continue
                 await db.add_credits(user_id, amount)
-                restored = await db.restore_offer(
-                    user_id, refund.get("offer_granted_at"), grace_minutes=15)
                 await db.mark_refund_done(refund["_id"])
                 new_balance = await db.get_credits(user_id)
                 log.info("Refund processed: %d credits to user %d", amount, user_id)
@@ -129,14 +127,16 @@ async def refund_processor(bot):
                     f"➕ Credits: +{amount}\n"
                     f"💰 New balance: {new_balance}"
                 )
-                offer_line = "\n🎁 **Discount offer active!** (15 min grace window)" if restored else ""
+                # No offer line here: the release path already restored the offer
+                # and said so. Restoring again an hour later would un-spend an
+                # offer the user may have spent on another purchase since.
                 try:
                     await bot.send_message(
                         user_id,
                         f"💰 **Credits refunded!**\n\n"
                         f"📱 Number: `{phone}`\n"
                         f"➕ **{amount}** credits returned to your account.\n"
-                        f"💰 New balance: **{new_balance}**{offer_line}",
+                        f"💰 New balance: **{new_balance}**",
                     )
                 except Exception:
                     pass
