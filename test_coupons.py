@@ -207,6 +207,31 @@ async def test_redeem_against_mongo():
         assert await db.restore_offer(uid_a, None) is False, "unkeyed restore was allowed"
         assert await db.get_active_offer(uid_a) is None
 
+        # A granted_at that has NOT round-tripped through Mongo still restores.
+        # set_offer returns its in-memory dict, whose datetime carries
+        # microseconds; BSON keeps milliseconds. A Python == between the two is
+        # False, so comparing in Python would refuse a restore the user is owed.
+        live = await db.set_offer(uid_a, 9, 6)
+        raw = live["granted_at"]
+        assert raw.microsecond % 1000, f"need sub-ms precision to test: {raw}"
+        await db.consume_offer(uid_a, raw)
+        assert await db.restore_offer(uid_a, raw) is True, (
+            "microsecond granted_at was rejected: restore compared in Python")
+        assert await db.get_active_offer(uid_a) is not None
+
+        # An offer carrying no granted_at at all must not be revived either.
+        # {"offer.granted_at": None} matches a missing field as well as an
+        # explicit null, so a legacy refund draining after deploy would hit this.
+        await db.db.users.update_one(
+            {"telegram_id": uid_b},
+            {"$set": {"offer": {"credits": big, "used": True,
+                                "expires_at": now + timedelta(hours=5)}}},
+        )
+        db._invalidate_user_cache(uid_b)
+        assert await db.restore_offer(uid_b, None) is False
+        assert await db.get_active_offer(uid_b) is None, (
+            "revived an offer that has no granted_at to key on")
+
         print("mongo redeem checks passed")
     finally:
         # Users first, and each guarded: the sentinels carry inflated
